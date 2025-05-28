@@ -9,6 +9,12 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, freebsd, openbsd, netbsd, windows]
+        goarch: [amd64, 386, arm, arm64]
+
     steps:
       - name: Check commit message for 'stable release'
         run: |
@@ -31,11 +37,7 @@ jobs:
         id: vars
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Build for Redis platforms
-        strategy:
-          matrix:
-            goos: [linux, darwin, freebsd, openbsd, netbsd, windows]
-            goarch: [amd64, 386, arm, arm64]
+      - name: Build for ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -48,7 +50,7 @@ jobs:
           go build -o "dist/$OUT" -ldflags "-s -w -X main.version=$VERSION"
           file dist/$OUT || true
 
-      - name: Create GitHub Release (latest)
+      - name: Upload to GitHub Release (tag: latest)
         uses: softprops/action-gh-release@v2
         with:
           name: "Latest Stable Release"
