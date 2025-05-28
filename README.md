@@ -11,6 +11,9 @@ It also supports:
 * Interactive restore wizard
 * Permission and ownership preservation
 * Friendly color-coded terminal output
+* Off-site replication to any FTP server (native client, remote retention × `--ftp-keep-factor`)
+* Ability to skip selected Redis ports (`--exclude-ports`)
+* Nagios-style integrity check (`--check`) for backup age and size
 
 ---
 
@@ -22,13 +25,20 @@ It also supports:
 
 #### Available Flags:
 
-| Flag            | Description                                    | Default   |
-| --------------- | ---------------------------------------------- | --------- |
-| `--backup-path` | Root directory to store all backups            | `/backup` |
-| `--days`        | Number of days to keep daily backups           | `30`      |
-| `--list`        | Show all existing backups and exit             |           |
-| `--restore`     | Launch interactive restore wizard              |           |
-| `--help`        | Show help and display detected Redis instances |           |
+| Flag                | Description                                                                  | Default                |
+| ------------------- | ---------------------------------------------------------------------------- | ---------------------- |
+| `--backup-path`     | Root directory to store all backups                                          | `/backup`              |
+| `--days`            | Number of days to keep daily backups locally                                 | `30`                   |
+| `--list`            | Show all existing backups and exit                                           |                        |
+| `--restore`         | Launch interactive restore wizard                                            |                        |
+| `--help`            | Show help and display detected Redis instances                               |                        |
+| `--exclude-ports`   | Comma-separated list of Redis ports to **exclude** from backup/check         |                        |
+| `--check`           | Verify freshness/size – CRITICAL if last backup older than *N* hours or <75% |                        |
+| `--ftp-conf`        | Path to FTP credentials file                                                 | `/etc/ftp-backup.conf` |
+| `--ftp-host`        | Override FTP host (takes precedence over conf file)                          |                        |
+| `--ftp-user`        | Override FTP username                                                        |                        |
+| `--ftp-pass`        | Override FTP password                                                        |                        |
+| `--ftp-keep-factor` | Store data on FTP **N ×** longer than locally                                | `4`                    |
 
 ---
 
@@ -44,6 +54,7 @@ Output:
 ✔ Redis 6379 → /var/lib/redis/dump.rdb
 📦 Archiving /mnt/backups/<host>/redis_6379/daily/2025-05-28_13-10-00_redis_6379.tar.gz
 💾 Archive size: 4.81 MB
+⇪ Uploading to FTP: host872.your-backup.de:/<path>/redis_6379/…
 ```
 
 To restore:
@@ -52,6 +63,13 @@ To restore:
 sudo ./backup-redis --restore
 ```
 
+To run integrity check (for Nagios or CI):
+
+```bash
+backup-redis --check 24
+```
+
+---
 
 ## 🇬🇧 Install `backup-redis` (amd64)
 
@@ -73,7 +91,6 @@ curl -L https://github.com/matveynator/backup-redis/releases/download/latest/bac
 curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_openbsd_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
 ```
 
-
 🧢 **FreeBSD (amd64)**
 
 ```bash
@@ -86,7 +103,6 @@ curl -L https://github.com/matveynator/backup-redis/releases/download/latest/bac
 > backup-redis --help
 > ```
 
-
 ---
 
 ## 🇷🇺 Как пользоваться `backup-redis`
@@ -95,13 +111,16 @@ curl -L https://github.com/matveynator/backup-redis/releases/download/latest/bac
 
 `backup-redis` — это автономная утилита на Go, которая автоматически находит все запущенные экземпляры Redis на сервере, определяет путь к их RDB-файлам через `CONFIG GET` и создает сжатые архивы `.tar.gz`.
 
-Функции:
+Поддерживает:
 
 * Автоопределение портов Redis
 * Хранение бэкапов: ежедневные, еженедельные, ежемесячные, годовые
 * Интерактивный мастер восстановления
 * Сохранение прав и владельцев файлов
 * Удобный вывод в терминал с цветами и подсказками
+* Репликация на FTP (автоматически, с увеличенным сроком хранения)
+* Исключение портов Redis при бэкапе или проверке (`--exclude-ports`)
+* Проверка свежести и размера бэкапа в стиле Nagios (`--check`)
 
 ---
 
@@ -113,13 +132,20 @@ curl -L https://github.com/matveynator/backup-redis/releases/download/latest/bac
 
 #### Доступные флаги:
 
-| Флаг            | Описание                                               | По умолчанию |
-| --------------- | ------------------------------------------------------ | ------------ |
-| `--backup-path` | Папка, в которую сохраняются все бэкапы                | `/backup`    |
-| `--days`        | Сколько дней хранить ежедневные бэкапы                 | `30`         |
-| `--list`        | Показать все существующие бэкапы и выйти               |              |
-| `--restore`     | Запустить мастер восстановления                        |              |
-| `--help`        | Показать справку и список обнаруженных Redis-инстансов |              |
+| Флаг                | Описание                                                                                      | По умолчанию           |
+| ------------------- | --------------------------------------------------------------------------------------------- | ---------------------- |
+| `--backup-path`     | Папка, в которую сохраняются все бэкапы                                                       | `/backup`              |
+| `--days`            | Сколько дней хранить ежедневные бэкапы                                                        | `30`                   |
+| `--list`            | Показать все существующие бэкапы и выйти                                                      |                        |
+| `--restore`         | Запустить мастер восстановления                                                               |                        |
+| `--help`            | Показать справку и список обнаруженных Redis-инстансов                                        |                        |
+| `--exclude-ports`   | Список портов Redis через запятую, которые **не** нужно бэкапить/проверять                    |                        |
+| `--check`           | Проверка свежести/размера – CRITICAL, если последний бэкап старше *N* часов или <75 % размера |                        |
+| `--ftp-conf`        | Путь к файлу с FTP-учётными данными                                                           | `/etc/ftp-backup.conf` |
+| `--ftp-host`        | Переопределить FTP-хост (приоритет выше конф-файла)                                           |                        |
+| `--ftp-user`        | Переопределить FTP-логин                                                                      |                        |
+| `--ftp-pass`        | Переопределить FTP-пароль                                                                     |                        |
+| `--ftp-keep-factor` | Хранить данные на FTP в **N раз** дольше, чем локально                                        | `4`                    |
 
 ---
 
@@ -135,6 +161,7 @@ sudo ./backup-redis --backup-path /mnt/backups
 ✔ Redis 6379 → /var/lib/redis/dump.rdb
 📦 Архивирование /mnt/backups/<host>/redis_6379/daily/2025-05-28_13-10-00_redis_6379.tar.gz
 💾 Размер архива: 4.81 MB
+⇪ Загрузка на FTP: host872.your-backup.de:/<path>/redis_6379/…
 ```
 
 Для восстановления:
@@ -142,6 +169,14 @@ sudo ./backup-redis --backup-path /mnt/backups
 ```bash
 sudo ./backup-redis --restore
 ```
+
+Проверка свежести и размера (для мониторинга или CI):
+
+```bash
+backup-redis --check 24
+```
+
+---
 
 ## 🇷🇺 Установка `backup-redis` (amd64)
 
@@ -174,23 +209,3 @@ curl -L https://github.com/matveynator/backup-redis/releases/download/latest/bac
 > ```bash
 > backup-redis --help
 > ```
-
----
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
