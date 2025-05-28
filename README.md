@@ -52,6 +52,41 @@ To restore:
 sudo ./backup-redis --restore
 ```
 
+
+## 🇬🇧 Install `backup-redis` (amd64)
+
+🔧 **Linux (amd64)**
+
+```bash
+curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_linux_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+```
+
+🍏 **macOS (amd64)**
+
+```bash
+curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_darwin_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+```
+
+🦫 **OpenBSD (amd64)**
+
+```bash
+curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_openbsd_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+```
+
+
+🧢 **FreeBSD (amd64)**
+
+```bash
+curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_freebsd_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+```
+
+> After installation, run:
+>
+> ```bash
+> backup-redis --help
+> ```
+
+
 ---
 
 ## 🇷🇺 Как пользоваться `backup-redis`
@@ -107,4 +142,55 @@ sudo ./backup-redis --backup-path /mnt/backups
 ```bash
 sudo ./backup-redis --restore
 ```
+
+## 🇷🇺 Установка `backup-redis` (amd64)
+
+🔧 **Linux (amd64)**
+
+```bash
+curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_linux_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+```
+
+🍏 **macOS (amd64)**
+
+```bash
+curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_darwin_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+```
+
+🦫 **OpenBSD (amd64)**
+
+```bash
+curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_openbsd_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+```
+
+🧢 **FreeBSD (amd64)**
+
+```bash
+curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_freebsd_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+```
+
+> После установки проверьте:
+>
+> ```bash
+> backup-redis --help
+> ```
+
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
