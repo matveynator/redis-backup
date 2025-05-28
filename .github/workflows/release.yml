@@ -1,9 +1,9 @@
+# .github/workflows/release.yml
 name: Build and Release Stable
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]         # релизим только из main-ветки
 
 jobs:
   build:
@@ -11,45 +11,43 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        goos: [linux, darwin, freebsd, openbsd, netbsd, windows]
+        goos:   [linux, darwin, freebsd, openbsd, netbsd, windows]
         goarch: [amd64, 386, arm, arm64]
 
     steps:
-      - name: Check commit message for 'stable release'
+      # запуск только если в сообщении коммита есть "stable release" (без учёта регистра)
+      - name: Check commit message
         run: |
           MSG="${{ github.event.head_commit.message }}"
           echo "Commit message: $MSG"
-          echo "$MSG" | grep -i 'stable release' || {
-            echo "❌ Commit does not contain 'stable release'. Skipping release."
+          echo "$MSG" | grep -iq 'stable release' || {
+            echo "❌ Commit does not contain 'stable release' ⇒ stopping workflow"
             exit 1
           }
 
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
 
-      - name: Get short Git commit SHA
+      - name: Save short commit SHA
         id: vars
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Build for ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
-          GOOS: ${{ matrix.goos }}
+          GOOS:   ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ steps.vars.outputs.sha_short }}
         run: |
           mkdir -p dist
           EXT=""
-          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+          [ "$GOOS" = "windows" ] && EXT=".exe"
           OUT="backup-redis_${GOOS}_${GOARCH}${EXT}"
           go build -o "dist/$OUT" -ldflags "-s -w -X main.version=$VERSION"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: binaries
           path: dist/
@@ -57,19 +55,17 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: binaries
           path: dist/
 
-      - name: Create GitHub Release (tag: latest)
+      - name: "Publish GitHub Release"
         uses: softprops/action-gh-release@v2
         with:
-          name: "Latest Stable Release"
-          tag_name: "latest"
+          name:  "Latest Stable Release"
+          tag_name: latest
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
