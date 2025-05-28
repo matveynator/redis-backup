@@ -1,13 +1,23 @@
 # .github/workflows/release.yml
+#
+# Build `backup-redis` for all POSIX-платформы, если сообщение коммита
+# содержит фразу “stable release” (без учёта регистра),
+# и публикует бинарники в GitHub Release с тегом latest.
+
 name: Build & Release Stable
 
 on:
   push:
     branches: [main]
 
+# 🔑 GitHub-токену нужны права «contents: write», чтобы создать релиз
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     strategy:
       fail-fast: false
       matrix:
@@ -23,14 +33,22 @@ jobs:
           - { goos: netbsd, goarch: amd64 }
 
     steps:
-      # выполняем только если сообщение коммита содержит "stable release"
-      - name: Abort if commit ≠ stable release
+      # 🛑 Прерываем workflow, если коммит не помечен как stable release
+      - name: Abort unless commit message contains “stable release”
         run: |
           echo "${{ github.event.head_commit.message }}" | grep -iq 'stable release' || exit 1
 
       - uses: actions/checkout@v4
+
+      # Если проекта ещё нет в go модулях — создаём минимальный go.mod,
+      # чтобы Go 1.22 не ругался. Удалите этот шаг, когда добавите свой go.mod
+      - name: Init go.mod if absent
+        run: |
+          test -f go.mod || go mod init backup-redis
+
       - uses: actions/setup-go@v5
-        with: { go-version: '1.22' }
+        with:
+          go-version: '1.22'
 
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
@@ -40,8 +58,9 @@ jobs:
         run: |
           mkdir -p dist
           go build -o "dist/backup-redis_${GOOS}_${GOARCH}" \
-              -ldflags "-s -w -X main.version=$VERSION"
+                   -ldflags "-s -w -X main.version=$VERSION"
 
+      # уникальное имя артефакта ⇒ нет конфликтов 409
       - uses: actions/upload-artifact@v4
         with:
           name: "bin-${{ matrix.goos }}-${{ matrix.goarch }}"
@@ -50,11 +69,13 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/download-artifact@v4
-        with: { path: dist-raw/ }
+        with:
+          path: dist-raw/
 
-      - name: Publish GitHub Release
+      - name: Publish GitHub Release (tag: latest)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
