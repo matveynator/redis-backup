@@ -13,10 +13,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
-// Runtime‑overrideable defaults
+// Runtime-overrideable defaults
 var (
 	backupPath string // root directory for all backups
 	keepDays   int    // daily retention
@@ -65,7 +66,39 @@ Options:
   --backup-path <dir>    root directory for backups (default: /backup)
   --days <n>             days to keep daily backups (default: 30)
   --help                 show help
-`, exe)
+
+By default *all* detected Redis instances are fully backed up.\n`, exe)
+
+	host, _ := os.Hostname()
+	ports := detectRedisPorts()
+	if len(ports) == 0 {
+		fmt.Println("No running redis-server processes detected.")
+		return
+	}
+
+	now := time.Now()
+	ts := now.Format("2006-01-02_15-04-05")
+	fmt.Println("\nPlanned backup targets:")
+	for _, port := range ports {
+		dir := getRedisDir(port)
+		file := getRedisRDB(port)
+		if dir == "" || file == "" {
+			continue
+		}
+		rdbPath := filepath.Join(dir, file)
+		archive := filepath.Join(backupPath, host, "redis_"+port, "daily", fmt.Sprintf("%s_redis_%s.tar.gz", ts, port))
+		fmt.Printf("  • Port %s: %s → %s\n", port, rdbPath, archive)
+	}
+}
+
+/**************** PERMISSION HELPERS *****************/
+func suggestSudo(err error) {
+	if err == nil {
+		return
+	}
+	if os.IsPermission(err) || strings.Contains(err.Error(), "permission denied") {
+		log.Printf("%sPermission denied – you may need to run with sudo%s", yellow, reset)
+	}
 }
 
 /******************** LIST ********************/
@@ -74,6 +107,7 @@ func listBackups() {
 	root := filepath.Join(backupPath, host)
 	entries, err := os.ReadDir(root)
 	if err != nil {
+		suggestSudo(err)
 		log.Fatalf("%sCannot open %s: %v%s", red, root, err, reset)
 	}
 	for _, e := range entries {
@@ -94,7 +128,13 @@ func interactiveRestore() {
 	root := filepath.Join(backupPath, host)
 	reader := bufio.NewReader(os.Stdin)
 
-	dirs, _ := os.ReadDir(root)
+	dirs, err := os.ReadDir(root)
+	if err != nil {
+		suggestSudo(err)
+		fmt.Printf("%sCannot open %s: %v%s\n", red, root, err, reset)
+		return
+	}
+
 	var ports []string
 	for _, d := range dirs {
 		if d.IsDir() && strings.HasPrefix(d.Name(), "redis_") {
@@ -120,7 +160,12 @@ func interactiveRestore() {
 	port := ports[idx-1]
 
 	dailyDir := filepath.Join(root, "redis_"+port, "daily")
-	files, _ := os.ReadDir(dailyDir)
+	files, err := os.ReadDir(dailyDir)
+	if err != nil {
+		suggestSudo(err)
+		fmt.Printf("%sCannot read %s: %v%s\n", red, dailyDir, err, reset)
+		return
+	}
 	if len(files) == 0 {
 		fmt.Printf("%sNo archives for port %s%s\n", red, port, reset)
 		return
@@ -169,6 +214,11 @@ func runBackup() {
 			continue
 		}
 		rdbPath := filepath.Join(dir, file)
+		if _, err := os.Stat(rdbPath); err != nil {
+			suggestSudo(err)
+			log.Printf("%sFile not found or inaccessible: %s%s", red, rdbPath, reset)
+			continue
+		}
 		log.Printf("%s✔ Redis %s → %s%s", green, port, rdbPath, reset)
 		backupInstance(port, rdbPath, host, now)
 	}
@@ -178,6 +228,7 @@ func runBackup() {
 func detectRedisPorts() []string {
 	out, err := exec.Command("pgrep", "-a", "redis-server").Output()
 	if err != nil {
+		suggestSudo(err)
 		log.Println("pgrep error:", err)
 		return nil
 	}
@@ -198,6 +249,7 @@ func detectRedisPorts() []string {
 func getRedisDir(port string) string {
 	out, err := exec.Command("redis-cli", "-p", port, "CONFIG", "GET", "dir").Output()
 	if err != nil {
+		suggestSudo(err)
 		return ""
 	}
 	parts := strings.Split(strings.TrimSpace(string(out)), "\n")
@@ -210,6 +262,7 @@ func getRedisDir(port string) string {
 func getRedisRDB(port string) string {
 	out, err := exec.Command("redis-cli", "-p", port, "CONFIG", "GET", "dbfilename").Output()
 	if err != nil {
+		suggestSudo(err)
 		return ""
 	}
 	parts := strings.Split(strings.TrimSpace(string(out)), "\n")
@@ -221,11 +274,6 @@ func getRedisRDB(port string) string {
 
 /**************** BACKUP SINGLE INSTANCE ************/
 func backupInstance(port, rdbPath, host string, now time.Time) {
-	if _, err := os.Stat(rdbPath); err != nil {
-		log.Printf("%sFile not found: %s%s", red, rdbPath, reset)
-		return
-	}
-
 	inst := "redis_" + port
 	base := filepath.Join(backupPath, host, inst)
 	daily := filepath.Join(base, "daily")
@@ -233,7 +281,11 @@ func backupInstance(port, rdbPath, host string, now time.Time) {
 	monthly := filepath.Join(base, "monthly")
 	yearly := filepath.Join(base, "yearly")
 	for _, d := range []string{daily, weekly, monthly, yearly} {
-		_ = os.MkdirAll(d, 0755)
+		if err := os.MkdirAll(d, 0755); err != nil {
+			suggestSudo(err)
+			log.Printf("mkdir %s: %v", d, err)
+			return
+		}
 	}
 
 	ts := now.Format("2006-01-02_15-04-05")
@@ -241,6 +293,7 @@ func backupInstance(port, rdbPath, host string, now time.Time) {
 
 	log.Printf("%s📦 Archiving %s …%s", cyan, archive, reset)
 	if err := createTarGz(archive, []string{rdbPath}); err != nil {
+		suggestSudo(err)
 		log.Printf("%sArchive error: %v%s", red, err, reset)
 		return
 	}
@@ -266,6 +319,7 @@ func restoreBackup(port, archiveName string) {
 	inst := "redis_" + port
 	archivePath := filepath.Join(backupPath, host, inst, "daily", archiveName)
 	if _, err := os.Stat(archivePath); err != nil {
+		suggestSudo(err)
 		log.Fatalf("%sArchive %s not found%s", red, archivePath, reset)
 	}
 
@@ -276,16 +330,38 @@ func restoreBackup(port, archiveName string) {
 	}
 
 	currentFile := filepath.Join(restoreDir, fileName)
-	if _, err := os.Stat(currentFile); err == nil {
+
+	// capture original metadata if present
+	var origUID, origGID int
+	var origMode os.FileMode
+	if info, err := os.Stat(currentFile); err == nil {
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			origUID = int(stat.Uid)
+			origGID = int(stat.Gid)
+		}
+		origMode = info.Mode()
 		backupName := currentFile + ".backup"
 		log.Printf("%s🔁 Renaming current RDB → %s%s", yellow, backupName, reset)
-		_ = os.Rename(currentFile, backupName)
+		if err := os.Rename(currentFile, backupName); err != nil {
+			suggestSudo(err)
+			log.Fatalf("%sCannot rename current file: %v%s", red, err, reset)
+		}
 	}
 
 	log.Printf("%s🔄 Extracting %s → %s%s", cyan, archiveName, restoreDir, reset)
 	if err := extractTarGz(archivePath, restoreDir); err != nil {
+		suggestSudo(err)
 		log.Fatalf("%sRestore error: %v%s", red, err, reset)
 	}
+
+	newFile := filepath.Join(restoreDir, fileName)
+	if origMode != 0 {
+		_ = os.Chmod(newFile, origMode)
+	}
+	if origUID != 0 || origGID != 0 {
+		_ = os.Chown(newFile, origUID, origGID)
+	}
+
 	log.Printf("%s✔ Restore complete%s", green, reset)
 }
 
@@ -293,6 +369,7 @@ func restoreBackup(port, archiveName string) {
 func createTarGz(dst string, files []string) error {
 	out, err := os.Create(dst)
 	if err != nil {
+		suggestSudo(err)
 		return err
 	}
 	defer out.Close()
@@ -306,6 +383,7 @@ func createTarGz(dst string, files []string) error {
 	for _, file := range files {
 		info, err := os.Stat(file)
 		if err != nil {
+			suggestSudo(err)
 			return err
 		}
 		hdr, err := tar.FileInfoHeader(info, "")
@@ -318,6 +396,7 @@ func createTarGz(dst string, files []string) error {
 		}
 		f, err := os.Open(file)
 		if err != nil {
+			suggestSudo(err)
 			return err
 		}
 		if _, err := io.Copy(tw, f); err != nil {
@@ -332,6 +411,7 @@ func createTarGz(dst string, files []string) error {
 func extractTarGz(src, dest string) error {
 	f, err := os.Open(src)
 	if err != nil {
+		suggestSudo(err)
 		return err
 	}
 	defer f.Close()
@@ -352,6 +432,7 @@ func extractTarGz(src, dest string) error {
 		outPath := filepath.Join(dest, hdr.Name)
 		of, err := os.Create(outPath)
 		if err != nil {
+			suggestSudo(err)
 			return err
 		}
 		if _, err := io.Copy(of, tr); err != nil {
@@ -359,6 +440,8 @@ func extractTarGz(src, dest string) error {
 			return err
 		}
 		of.Close()
+		_ = os.Chmod(outPath, os.FileMode(hdr.Mode))
+		_ = os.Chown(outPath, hdr.Uid, hdr.Gid)
 	}
 	return nil
 }
@@ -366,17 +449,20 @@ func extractTarGz(src, dest string) error {
 func copyFile(src, dst string) {
 	in, err := os.Open(src)
 	if err != nil {
+		suggestSudo(err)
 		log.Printf("open %s: %v", src, err)
 		return
 	}
 	defer in.Close()
 	out, err := os.Create(dst)
 	if err != nil {
+		suggestSudo(err)
 		log.Printf("create %s: %v", dst, err)
 		return
 	}
 	defer out.Close()
 	_, _ = io.Copy(out, in)
+	_ = os.Chmod(dst, 0644)
 }
 
 func printFileSize(path string) {
