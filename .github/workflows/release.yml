@@ -4,16 +4,16 @@ name: Build and Release Stable
 on:
   push:
     branches:
-      - main            # релизим только из main
+      - main
 
-# GitHub-токену воркфлоу нужны права на запись в contents, чтобы делать релизы
+# токену воркфлоу нужны права «contents: write», чтобы создать/обновить релиз
 permissions:
   contents: write
 
 jobs:
   build:
-    # Запускаем job только если в сообщении коммита есть 'stable release'
-    if: contains(toJson(github.event.head_commit.message), 'stable release', 'true')
+    # job запускается только если commit-message содержит 'stable release'
+    if: contains(toJson(github.event.head_commit.message), 'stable release')
     runs-on: ubuntu-latest
 
     strategy:
@@ -34,8 +34,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Если go.mod отсутствует (пустой репо) — создаём минимальный
-      - name: Init go.mod (if absent)
+      # если go.mod отсутствует, создаём минимальный (можно удалить после добавления своего)
+      - name: Init go.mod if absent
         run: |
           test -f go.mod || go mod init backup-redis
 
@@ -44,7 +44,7 @@ jobs:
         with:
           go-version: "1.22"
 
-      - name: Build ${{ matrix.goos }}/{{ matrix.goarch }}
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
           GOOS:   ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -54,7 +54,6 @@ jobs:
           go build -o "dist/backup-redis_${GOOS}_${GOARCH}" \
                    -ldflags "-s -w -X main.version=$VERSION"
 
-      # Каждый артефакт в своём имени → нет 409 Conflict
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -74,7 +73,7 @@ jobs:
       - name: Publish GitHub Release (tag latest)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest               # релиз всегда «latest»
+          tag_name: latest
           name: "Latest Stable Release"
           files: dist-raw/**/*
         env:
