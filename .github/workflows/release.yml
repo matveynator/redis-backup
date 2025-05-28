@@ -1,4 +1,7 @@
 # .github/workflows/release.yml
+# Build «backup-redis» статическими бинарниками (CGO_DISABLED),
+# выпуск в GitHub Release «latest» при коммите с фразой `stable release`.
+
 name: Build and Release Stable
 
 on:
@@ -6,13 +9,13 @@ on:
     branches:
       - main
 
-# токену воркфлоу нужны права «contents: write», чтобы создать/обновить релиз
+# токену нужен доступ на запись (создаём/обновляем релиз)
 permissions:
   contents: write
 
 jobs:
   build:
-    # job запускается только если commit-message содержит 'stable release'
+    # Запуск только когда сообщение коммита содержит 'stable release'
     if: contains(toJson(github.event.head_commit.message), 'stable release')
     runs-on: ubuntu-latest
 
@@ -31,10 +34,10 @@ jobs:
           - { goos: netbsd, goarch: amd64 }
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # если go.mod отсутствует, создаём минимальный (можно удалить после добавления своего)
+      # создаём минимальный go.mod, если проекта ещё нет в модулях
       - name: Init go.mod if absent
         run: |
           test -f go.mod || go mod init backup-redis
@@ -44,17 +47,21 @@ jobs:
         with:
           go-version: "1.22"
 
-      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+      # 🔨 СТАТИЧЕСКАЯ СБОРКА (CGO_ENABLED=0)
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }} (static)
         env:
           GOOS:   ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0            # 👈 отключаем CGO → статический бинарник
+          CGO_ENABLED: 0                    # статический бинарь
           VERSION: ${{ github.sha }}
         run: |
           mkdir -p dist
-          go build -o "dist/backup-redis_${GOOS}_${GOARCH}" \
-                   -ldflags "-s -w -X main.version=$VERSION"
+          GOFLAGS="-trimpath" \
+          go build -tags netgo,osusergo \
+                   -ldflags "-s -w -X main.version=$VERSION" \
+                   -o "dist/backup-redis_${GOOS}_${GOARCH}"
 
+      # каждый артефакт — уникальное имя → нет 409 conflicts
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -64,7 +71,6 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -73,9 +79,11 @@ jobs:
 
       - name: Publish GitHub Release (tag latest)
         uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: latest
           name: "Latest Stable Release"
+          prerelease: false
           files: dist-raw/**/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
