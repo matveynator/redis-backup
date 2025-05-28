@@ -48,6 +48,7 @@ jobs:
         env:
           GOOS:   ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0            # 👈 отключаем CGO → статический бинарник
           VERSION: ${{ github.sha }}
         run: |
           mkdir -p dist
