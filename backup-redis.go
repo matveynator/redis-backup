@@ -293,6 +293,7 @@ func runBackup() {
             remoteRel = strings.TrimPrefix(remoteRel, string(os.PathSeparator))
             uploadToFTP(archivePath, remoteRel)
         }
+		log.Printf("%s----------------------------------------%s", cyan, reset)
     }
 }
 
@@ -400,7 +401,6 @@ func backupInstance(port, rdbPath, host string, now time.Time) string {
     }
 
     cleanupOldFiles(daily, keepDays)
-    log.Printf("%s----------------------------------------%s", cyan, reset)
     return archive
 }
 
