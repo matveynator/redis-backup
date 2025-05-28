@@ -6,58 +6,45 @@ on:
     branches:
       - main            # релизим только из main
 
-# токену Actions нужны права писать contents (теги, релизы, файлы)
+# GitHub-токену воркфлоу нужны права на запись в contents, чтобы делать релизы
 permissions:
   contents: write
 
 jobs:
   build:
+    # Запускаем job только если в сообщении коммита есть 'stable release'
+    if: contains(toJson(github.event.head_commit.message), 'stable release', 'true')
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - goos: linux   # x86_64
-            goarch: amd64
-          - goos: linux   # arm64
-            goarch: arm64
-          - goos: linux   # x86 (32-bit)
-            goarch: 386
-          - goos: linux   # armv7
-            goarch: arm
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: freebsd
-            goarch: amd64
-          - goos: openbsd
-            goarch: amd64
-          - goos: netbsd
-            goarch: amd64
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+          - { goos: linux,  goarch: 386 }
+          - { goos: linux,  goarch: arm }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: freebsd, goarch: amd64 }
+          - { goos: openbsd, goarch: amd64 }
+          - { goos: netbsd, goarch: amd64 }
 
     steps:
-      - name: Check commit message for 'stable release'
-        run: |
-          echo "${{ github.event.head_commit.message }}" | grep -iq 'stable release' || exit 1
-
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
+
+      # Если go.mod отсутствует (пустой репо) — создаём минимальный
+      - name: Init go.mod (if absent)
+        run: |
+          test -f go.mod || go mod init backup-redis
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: "1.22"
 
-      # создаём минимальный go.mod, если его нет (убери шаг, когда добавишь свой)
-      - name: Init go.mod if absent
-        run: |
-          if [ ! -f go.mod ]; then
-            go mod init backup-redis
-          fi
-
-      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+      - name: Build ${{ matrix.goos }}/{{ matrix.goarch }}
         env:
           GOOS:   ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -67,11 +54,11 @@ jobs:
           go build -o "dist/backup-redis_${GOOS}_${GOARCH}" \
                    -ldflags "-s -w -X main.version=$VERSION"
 
-      # уникальное имя артефакта → нет 409 Conflict
+      # Каждый артефакт в своём имени → нет 409 Conflict
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "bin-${{ matrix.goos }}-${{ matrix.goarch }}"
+          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
 
   release:
@@ -84,12 +71,11 @@ jobs:
         with:
           path: dist-raw/
 
-      - name: Publish GitHub Release (tag: latest)
+      - name: Publish GitHub Release (tag latest)
         uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest               # релиз всегда «latest»
+          name: "Latest Stable Release"
+          files: dist-raw/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: latest                # релиз всегда называется latest
-          name: Latest Stable Release
-          files: 'dist-raw/**/*'
-
