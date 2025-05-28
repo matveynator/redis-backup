@@ -1,9 +1,8 @@
-# .github/workflows/release.yml
 name: Build and Release Stable
 
 on:
   push:
-    branches: [main]         # релизим только из main-ветки
+    branches: [main]
 
 jobs:
   build:
@@ -11,57 +10,65 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        goos:   [linux, darwin, freebsd, openbsd, netbsd, windows]
-        goarch: [amd64, 386, arm, arm64]
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: linux,   goarch: 386 }
+          - { goos: linux,   goarch: arm }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+          - { goos: windows, goarch: 386 }
+          - { goos: freebsd, goarch: amd64 }
+          - { goos: openbsd, goarch: amd64 }
+          - { goos: netbsd,  goarch: amd64 }
 
     steps:
-      # запуск только если в сообщении коммита есть "stable release" (без учёта регистра)
-      - name: Check commit message
+      - name: Check commit message (‘stable release’)
         run: |
           MSG="${{ github.event.head_commit.message }}"
-          echo "Commit message: $MSG"
           echo "$MSG" | grep -iq 'stable release' || {
-            echo "❌ Commit does not contain 'stable release' ⇒ stopping workflow"
-            exit 1
-          }
+            echo "❌ Commit doesn’t contain ‘stable release’ – cancel build"; exit 1; }
 
       - uses: actions/checkout@v4
 
+      # инициализируем go.mod если его ещё нет
+      - name: Init go.mod if absent
+        run: |
+          if [ ! -f go.mod ]; then
+            go mod init backup-redis
+          fi
+
       - uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
+        with: { go-version: '1.22' }
 
       - name: Save short commit SHA
         id: vars
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Build for ${{ matrix.goos }}/${{ matrix.goarch }}
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         env:
           GOOS:   ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ steps.vars.outputs.sha_short }}
         run: |
           mkdir -p dist
-          EXT=""
-          [ "$GOOS" = "windows" ] && EXT=".exe"
+          EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
           OUT="backup-redis_${GOOS}_${GOARCH}${EXT}"
           go build -o "dist/$OUT" -ldflags "-s -w -X main.version=$VERSION"
 
       - uses: actions/upload-artifact@v4
-        with:
-          name: binaries
-          path: dist/
+        with: { name: binaries, path: dist/ }
 
   release:
     needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
-        with:
-          name: binaries
-          path: dist/
+        with: { name: binaries, path: dist/ }
 
-      - name: "Publish GitHub Release"
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name:  "Latest Stable Release"
