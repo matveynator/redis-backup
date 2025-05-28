@@ -16,7 +16,9 @@ import (
     "syscall"
     "time"
 
-    "github.com/jlaffaye/ftp"
+	"github.com/jlaffaye/ftp"
+	"github.com/shirou/gopsutil/v3/net"
+	"github.com/shirou/gopsutil/v3/process"
 )
 
 // Runtime-overrideable defaults
@@ -295,26 +297,44 @@ func runBackup() {
 }
 
 /***************** REDIS HELPERS *******************/
+
 func detectRedisPorts() []string {
-    out, err := exec.Command("pgrep", "-a", "redis-server").Output()
-    if err != nil {
-        suggestSudo(err)
-        log.Println("pgrep error:", err)
-        return nil
-    }
     var ports []string
-    for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-        if strings.Contains(line, "redis-server") {
-            for _, fld := range strings.Fields(line) {
-                if strings.Contains(fld, ":") {
-                    parts := strings.Split(fld, ":")
-                    ports = append(ports, parts[len(parts)-1])
-                }
-            }
+
+    conns, err := net.Connections("tcp")
+    if err != nil {
+        log.Println("net.Connections error:", err)
+        return ports
+    }
+
+    for _, conn := range conns {
+        if conn.Status != "LISTEN" || conn.Pid == 0 {
+            continue
+        }
+
+        proc, err := process.NewProcess(conn.Pid)
+        if err != nil {
+            continue
+        }
+
+        name, err := proc.Name()
+        if err != nil || !strings.Contains(strings.ToLower(name), "redis-server") {
+            continue
+        }
+
+        if conn.Laddr.Port != 0 {
+            ports = append(ports, strconv.Itoa(int(conn.Laddr.Port)))
         }
     }
+
     return ports
 }
+
+
+
+
+
+
 
 func getRedisDir(port string) string {
     out, err := exec.Command("redis-cli", "-p", port, "CONFIG", "GET", "dir").Output()
