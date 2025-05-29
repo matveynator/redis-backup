@@ -1,7 +1,7 @@
 <img src="https://repository-images.githubusercontent.com/991835536/72ff229d-e789-4fc8-883d-53439aab3c0d" align="right" width="60%">
 
 ## 🇬🇧 `redis-backup` 
-<a href="#-использование"> 🇷🇺 Инструкция на Русском</a>
+<a href="#-использование">🇷🇺 Инструкция на Русском</a>
 
 ## English
 
