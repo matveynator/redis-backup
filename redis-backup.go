@@ -57,6 +57,7 @@ const (
 )
 
 const lockFile = "/tmp/redis_backup.lock"
+const backupSubdir = "redis-backup"
 
 func main() {
 	// Define flags
@@ -184,12 +185,14 @@ func suggestSudo(err error) {
 /******************** LIST ********************/
 func listBackups() {
 	host, _ := os.Hostname()
-	root := filepath.Join(backupPath, host)
+	root := filepath.Join(backupPath, host, backupSubdir) // ← добавили backupSubdir
+
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		suggestSudo(err)
 		log.Fatalf("%sCannot open %s: %v%s", red, root, err, reset)
 	}
+
 	for _, e := range entries {
 		if e.IsDir() && strings.HasPrefix(e.Name(), "redis_") {
 			daily := filepath.Join(root, e.Name(), "daily")
@@ -205,7 +208,7 @@ func listBackups() {
 /**************** INTERACTIVE RESTORE *********/
 func interactiveRestore() {
 	host, _ := os.Hostname()
-	root := filepath.Join(backupPath, host)
+	root := filepath.Join(backupPath, host, backupSubdir) // ← добавили backupSubdir
 	reader := bufio.NewReader(os.Stdin)
 
 	dirs, err := os.ReadDir(root)
@@ -239,7 +242,7 @@ func interactiveRestore() {
 	}
 	port := ports[idx-1]
 
-	dailyDir := filepath.Join(root, "redis_"+port, "daily")
+	dailyDir := filepath.Join(root, "redis_"+port, "daily") // ← путь через backupSubdir
 	files, err := os.ReadDir(dailyDir)
 	if err != nil {
 		suggestSudo(err)
@@ -264,7 +267,8 @@ func interactiveRestore() {
 	}
 	archive := files[idx-1].Name()
 
-	fmt.Printf("%s⚠  Redis %s will be restored from %s. Continue? (y/N): %s", yellow, port, archive, reset)
+	fmt.Printf("%s⚠  Redis %s will be restored from %s. Continue? (y/N): %s",
+		yellow, port, archive, reset)
 	confirm, _ := reader.ReadString('\n')
 	confirm = strings.ToLower(strings.TrimSpace(confirm))
 	if confirm != "y" && confirm != "yes" {
@@ -272,7 +276,7 @@ func interactiveRestore() {
 		return
 	}
 
-	restoreBackup(port, archive)
+	restoreBackup(port, archive) // restoreBackup тоже обновлён, см. ниже
 }
 
 /******************* BACKUP LOOP *******************/
@@ -380,11 +384,13 @@ func getRedisRDB(port string) string {
 /**************** BACKUP SINGLE INSTANCE ************/
 func backupInstance(port, rdbPath, host string, now time.Time) string {
 	inst := "redis_" + port
-	base := filepath.Join(backupPath, host, inst)
+	base := filepath.Join(backupPath, host, backupSubdir, inst) // ← добавили backupSubdir
+
 	daily := filepath.Join(base, "daily")
 	weekly := filepath.Join(base, "weekly")
 	monthly := filepath.Join(base, "monthly")
 	yearly := filepath.Join(base, "yearly")
+
 	for _, d := range []string{daily, weekly, monthly, yearly} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			suggestSudo(err)
@@ -422,7 +428,9 @@ func backupInstance(port, rdbPath, host string, now time.Time) string {
 func restoreBackup(port, archiveName string) {
 	host, _ := os.Hostname()
 	inst := "redis_" + port
-	archivePath := filepath.Join(backupPath, host, inst, "daily", archiveName)
+	archivePath := filepath.Join(backupPath, host, backupSubdir, // ← добавили backupSubdir
+		inst, "daily", archiveName)
+
 	if _, err := os.Stat(archivePath); err != nil {
 		suggestSudo(err)
 		log.Fatalf("%sArchive %s not found%s", red, archivePath, reset)
@@ -436,9 +444,10 @@ func restoreBackup(port, archiveName string) {
 
 	currentFile := filepath.Join(restoreDir, fileName)
 
-	// capture original metadata if present
+	// --- сохраняем старый RDB (если был) ---
 	var origUID, origGID int
 	var origMode os.FileMode
+
 	if info, err := os.Stat(currentFile); err == nil {
 		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 			origUID = int(stat.Uid)
@@ -594,7 +603,6 @@ func cleanupOldFilesFTP(c *ftp.ServerConn, dir string, days int) {
 }
 
 /********************** CHECK MODE ********************/
-/********************** CHECK MODE ********************/
 func runCheckMode() {
 	problems := []string{}
 	severity := 0 // 0-OK, 1-WARNING, 2-CRITICAL
@@ -603,13 +611,12 @@ func runCheckMode() {
 	now := time.Now()
 	threshold := now.Add(-time.Duration(checkHours) * time.Hour)
 
-	// ------------------------------------------------- суммарный объём каталога хоста
-	totalSize, _ := dirSize(filepath.Join(backupPath, host))
+	// -------- суммарный объём каталога хоста ----------
+	totalSize, _ := dirSize(filepath.Join(backupPath, host, backupSubdir)) // ← путь с backupSubdir
 
-	var latestSetSize int64 // суммарный размер «последнего архива на каждый порт»
-	var latestFiles int     // сколько портов имеют свежий архив
+	var latestSetSize int64
+	var latestFiles int
 
-	// ------------------------------------------------- обход всех redis-портов
 	ports := detectRedisPorts()
 	for _, port := range ports {
 		if _, skip := excludePorts[port]; skip {
@@ -617,7 +624,7 @@ func runCheckMode() {
 		}
 
 		inst := "redis_" + port
-		dailyDir := filepath.Join(backupPath, host, inst, "daily")
+		dailyDir := filepath.Join(backupPath, host, backupSubdir, inst, "daily") // ←
 		latestFile, latestMTime := findLatestArchive(dailyDir)
 
 		if latestFile == "" {
@@ -626,7 +633,8 @@ func runCheckMode() {
 			continue
 		}
 		if latestMTime.Before(threshold) {
-			problems = append(problems, fmt.Sprintf("Redis %s: older than %d h", port, checkHours))
+			problems = append(problems,
+				fmt.Sprintf("Redis %s: older than %d h", port, checkHours))
 			severity = max(severity, 2)
 		}
 
@@ -635,15 +643,16 @@ func runCheckMode() {
 			latestFiles++
 		}
 
-		// проверяем усыхание архива
+		// усыхание архива
 		currentRDB := filepath.Join(getRedisDir(port), getRedisRDB(port))
 		if sizeOK, err := compareSizes(currentRDB, latestFile); err == nil && !sizeOK {
-			problems = append(problems, fmt.Sprintf("Redis %s: backup size <75%%", port))
+			problems = append(problems,
+				fmt.Sprintf("Redis %s: backup size <75%%", port))
 			severity = max(severity, 2)
 		}
 	}
 
-	// ------------------------------------------------- дисковая статистика и пороги
+	// -------- дисковая статистика / пороги -----------
 	var copiesPossible int64
 	if latestSetSize > 0 {
 		diskTotal, diskFree, errDisk := diskUsage(backupPath)
@@ -652,13 +661,8 @@ func runCheckMode() {
 		}
 
 		copiesPossible = diskFree / latestSetSize
+		usedPct := float64(totalSize) / float64(diskTotal) * 100
 
-		usedPct := 0.0
-		if diskTotal > 0 {
-			usedPct = float64(totalSize) / float64(diskTotal) * 100
-		}
-
-		// пороговые значения
 		if copiesPossible < 5 || usedPct >= 90 {
 			severity = max(severity, 2)
 			problems = append(problems, "disk pressure CRITICAL")
@@ -672,12 +676,12 @@ func runCheckMode() {
 				"can store ≈ %d full sets; used by backups: %.1f%%\n",
 			humanMB(totalSize), latestFiles, humanMB(latestSetSize),
 			humanMB(diskFree), copiesPossible, usedPct)
+
 	} else {
 		fmt.Println("No backups found at all")
 		severity = 2
 	}
 
-	// ------------------------------------------------- итоговый exit-code (Nagios совместим)
 	switch severity {
 	case 2:
 		fmt.Printf("CRITICAL: %s\n", strings.Join(problems, "; "))
