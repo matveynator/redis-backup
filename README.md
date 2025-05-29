@@ -70,6 +70,13 @@ curl -L https://github.com/matveynator/redis-backup/releases/download/latest/red
 curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_darwin_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
 ```
 
+**OpenBSD (amd64):**
+
+```bash
+curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_openbsd_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
+```
+
+
 **FreeBSD (amd64):**
 
 ```bash
@@ -143,6 +150,11 @@ curl -L https://github.com/matveynator/redis-backup/releases/download/latest/red
 
 ```bash
 curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_darwin_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
+```
+**OpenBSD (amd64):**
+
+```bash
+curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_openbsd_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
 ```
 
 **FreeBSD (amd64):**
