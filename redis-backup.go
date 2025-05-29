@@ -7,6 +7,7 @@ import (
     "flag"
     "fmt"
     "io"
+	"io/fs"
     "log"
     "os"
     "os/exec"
@@ -595,11 +596,19 @@ func cleanupOldFilesFTP(c *ftp.ServerConn, dir string, days int) {
 }
 
 /********************** CHECK MODE ********************/
+// ---------- runCheckMode (замените только помеченные строки) ----------
 func runCheckMode() {
-    problems := make([]string, 0)
+    problems := []string{}
+    severity := 0
+
     host, _ := os.Hostname()
     now := time.Now()
     threshold := now.Add(-time.Duration(checkHours) * time.Hour)
+
+    // общие размеры ----------------------------------------------------
+    totalSize, _ := dirSize(filepath.Join(backupPath, host))
+    var latestSetSize int64     // СУММАРНЫЙ размер последних архивов (по одному на порт)
+    var latestFiles int         // сколько портов нашли свежий архив
 
     ports := detectRedisPorts()
     for _, port := range ports {
@@ -612,32 +621,74 @@ func runCheckMode() {
         latestFile, latestMTime := findLatestArchive(dailyDir)
         if latestFile == "" {
             problems = append(problems, fmt.Sprintf("Redis %s: NO BACKUP", port))
+            severity = max(severity, 2)
             continue
         }
         if latestMTime.Before(threshold) {
-            problems = append(problems, fmt.Sprintf("Redis %s: older than %d hours", port, checkHours))
+            problems = append(problems, fmt.Sprintf("Redis %s: older than %d h", port, checkHours))
+            severity = max(severity, 2)
         }
 
-        // Size comparison
-        currentRDB := filepath.Join(getRedisDir(port), getRedisRDB(port))
-        if currentRDB == "" {
-            continue
+        /* ------ теперь считаем размер комплекта ------ */
+        if fi, err := os.Stat(latestFile); err == nil {
+            latestSetSize += fi.Size()
+            latestFiles++
         }
-        if sizeOK, err := compareSizes(currentRDB, latestFile); err == nil {
-            if !sizeOK {
-                problems = append(problems, fmt.Sprintf("Redis %s: backup size <75%%", port))
-            }
+
+        // «не усох» ли архив
+        currentRDB := filepath.Join(getRedisDir(port), getRedisRDB(port))
+        if sizeOK, err := compareSizes(currentRDB, latestFile); err == nil && !sizeOK {
+            problems = append(problems, fmt.Sprintf("Redis %s: backup size <75%%", port))
+            severity = max(severity, 2)
         }
     }
 
-    if len(problems) > 0 {
+    // если хотя бы один порт, вычисляем вместимость
+    var copiesPossible int64
+    if latestSetSize > 0 {
+        var fs syscall.Statfs_t
+        _ = syscall.Statfs(backupPath, &fs)
+        diskFree := int64(fs.Bavail) * int64(fs.Bsize)
+
+        copiesPossible = diskFree / latestSetSize
+
+        // пороги
+        usedPct := float64(totalSize) / (float64(fs.Blocks) * float64(fs.Bsize)) * 100
+        if copiesPossible < 5 || usedPct >= 90 {
+            severity = max(severity, 2)
+            problems = append(problems, "disk pressure CRITICAL")
+        } else if copiesPossible < 24 || usedPct >= 80 {
+            severity = max(severity, 1)
+            problems = append(problems, "disk pressure WARNING")
+        }
+
+        fmt.Printf(
+            "Backups total: %.1f MB (%d files); full set: %.1f MB; free: %.1f MB; can store ≈ %d full sets; used by backups: %.1f%%\n",
+            humanMB(totalSize), latestFiles, humanMB(latestSetSize), humanMB(diskFree), copiesPossible, usedPct)
+    } else {
+        fmt.Println("No backups found at all")
+        severity = 2
+    }
+
+    switch severity {
+    case 2:
         fmt.Printf("CRITICAL: %s\n", strings.Join(problems, "; "))
         os.Exit(2)
+    case 1:
+        fmt.Printf("WARNING: %s\n", strings.Join(problems, "; "))
+        os.Exit(1)
+    default:
+        fmt.Println("OK: all redis backups fresh and sufficiently sized")
+        os.Exit(0)
     }
-    fmt.Println("OK: all redis backups fresh and sufficiently sized")
-	os.Exit(0)
 }
 
+func max(a, b int) int {
+    if b > a {
+        return b
+    }
+    return a
+}
 func findLatestArchive(dir string) (string, time.Time) {
     files, err := os.ReadDir(dir)
     if err != nil || len(files) == 0 {
@@ -842,3 +893,18 @@ func releaseLock() {
     _ = os.Remove(lockFile)
 }
 
+func dirSize(root string) (int64, error) {
+    var sum int64
+    err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+        if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".tar.gz") {
+            return err
+        }
+        if fi, err := os.Stat(path); err == nil {
+            sum += fi.Size()
+        }
+        return nil
+    })
+    return sum, err
+}
+
+func humanMB(b int64) float64 { return float64(b) / (1024 * 1024) }
