@@ -185,8 +185,8 @@ FTP_PASS=mypass
 
 ## 🧼 Auto-cleanup
 
-* Locally: old daily archives are deleted after `--days` days (default: 1).
-* On FTP: files are deleted after `days × ftp-keep-factor` (default: ×4 = 4 days).
+* Locally: old daily archives are deleted after `--days` days (default: 30).
+* On FTP: files are deleted after `days × ftp-keep-factor` (default: ×4 = 120 days).
 
 ---
 
@@ -351,8 +351,8 @@ FTP_PASS=mypass
 
 ## 🧼 Автоудаление
 
-* Локально: старые daily-архивы удаляются через --days дней (по умолчанию 1).
-* На FTP: удаление производится по формуле days × ftp-keep-factor (по умолчанию ×4 = 4 дней).
+* Локально: старые daily-архивы удаляются через --days дней (по умолчанию 30).
+* На FTP: удаление производится по формуле days × ftp-keep-factor (по умолчанию ×4 = 120 дней).
 
 ---
 
