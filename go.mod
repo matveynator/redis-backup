@@ -1,4 +1,4 @@
-module backup-redis
+module redis-backup
 
 go 1.23.2
 

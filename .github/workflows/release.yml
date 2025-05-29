@@ -1,5 +1,5 @@
 # .github/workflows/release.yml
-# Build «backup-redis» статическими бинарниками (CGO_DISABLED),
+# Build «redis-backup» статическими бинарниками (CGO_DISABLED),
 # выпуск в GitHub Release «latest» при коммите с фразой `stable release`.
 
 name: Build and Release Stable
@@ -40,7 +40,7 @@ jobs:
       # создаём минимальный go.mod, если проекта ещё нет в модулях
       - name: Init go.mod if absent
         run: |
-          test -f go.mod || go mod init backup-redis
+          test -f go.mod || go mod init redis-backup
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -59,7 +59,7 @@ jobs:
           GOFLAGS="-trimpath" \
           go build -tags netgo,osusergo \
                    -ldflags "-s -w -X main.version=$VERSION" \
-                   -o "dist/backup-redis_${GOOS}_${GOARCH}"
+                   -o "dist/redis-backup_${GOOS}_${GOARCH}"
 
       # каждый артефакт — уникальное имя → нет 409 conflicts
       - name: Upload artifact

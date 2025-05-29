@@ -1,9 +1,9 @@
 
-## 🇬🇧 How to use `backup-redis`
+## 🇬🇧 How to use `redis-backup`
 
 ### 📦 Overview
 
-`backup-redis` is a standalone Go utility that automatically detects all running Redis instances on the server, identifies their RDB file paths via `CONFIG GET`, and creates compressed `.tar.gz` backups.
+`redis-backup` is a standalone Go utility that automatically detects all running Redis instances on the server, identifies their RDB file paths via `CONFIG GET`, and creates compressed `.tar.gz` backups.
 
 It also supports:
 
@@ -21,7 +21,7 @@ It also supports:
 ### 🚀 Usage
 
 ```bash
-./backup-redis [flags]
+./redis-backup [flags]
 ```
 
 #### Available Flags:
@@ -46,7 +46,7 @@ It also supports:
 ### 🔍 Example
 
 ```bash
-sudo ./backup-redis --backup-path /mnt/backups
+sudo ./redis-backup --backup-path /mnt/backups
 ```
 
 Output:
@@ -61,56 +61,56 @@ Output:
 To restore:
 
 ```bash
-sudo ./backup-redis --restore
+sudo ./redis-backup --restore
 ```
 
 To run integrity check (for Nagios or CI):
 
 ```bash
-backup-redis --check 24
+redis-backup --check 24
 ```
 
 ---
 
-## 🇬🇧 Install `backup-redis` (amd64)
+## 🇬🇧 Install `redis-backup` (amd64)
 
 🔧 **Linux (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_linux_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_linux_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
 ```
 
 🍏 **macOS (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_darwin_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_darwin_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
 ```
 
 🦫 **OpenBSD (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_openbsd_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_openbsd_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
 ```
 
 🧢 **FreeBSD (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_freebsd_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_freebsd_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
 ```
 
 > After installation, run:
 >
 > ```bash
-> backup-redis --help
+> redis-backup --help
 > ```
 
 ---
 
-## 🇷🇺 Как пользоваться `backup-redis`
+## 🇷🇺 Как пользоваться `redis-backup`
 
 ### 📦 Обзор
 
-`backup-redis` — это автономная утилита на Go, которая автоматически находит все запущенные экземпляры Redis на сервере, определяет путь к их RDB-файлам через `CONFIG GET` и создает сжатые архивы `.tar.gz`.
+`redis-backup` — это автономная утилита на Go, которая автоматически находит все запущенные экземпляры Redis на сервере, определяет путь к их RDB-файлам через `CONFIG GET` и создает сжатые архивы `.tar.gz`.
 
 Поддерживает:
 
@@ -128,7 +128,7 @@ curl -L https://github.com/matveynator/backup-redis/releases/download/latest/bac
 ### 🚀 Использование
 
 ```bash
-./backup-redis [флаги]
+./redis-backup [флаги]
 ```
 
 #### Доступные флаги:
@@ -153,7 +153,7 @@ curl -L https://github.com/matveynator/backup-redis/releases/download/latest/bac
 ### 🔍 Пример
 
 ```bash
-sudo ./backup-redis --backup-path /mnt/backups
+sudo ./redis-backup --backup-path /mnt/backups
 ```
 
 Вывод:
@@ -168,45 +168,45 @@ sudo ./backup-redis --backup-path /mnt/backups
 Для восстановления:
 
 ```bash
-sudo ./backup-redis --restore
+sudo ./redis-backup --restore
 ```
 
 Проверка свежести и размера (для мониторинга или CI):
 
 ```bash
-backup-redis --check 24
+redis-backup --check 24
 ```
 
 ---
 
-## 🇷🇺 Установка `backup-redis` (amd64)
+## 🇷🇺 Установка `redis-backup` (amd64)
 
 🔧 **Linux (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_linux_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_linux_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
 ```
 
 🍏 **macOS (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_darwin_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_darwin_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
 ```
 
 🦫 **OpenBSD (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_openbsd_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_openbsd_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
 ```
 
 🧢 **FreeBSD (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/backup-redis/releases/download/latest/backup-redis_freebsd_amd64 -o /usr/local/bin/backup-redis && chmod +x /usr/local/bin/backup-redis
+curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_freebsd_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
 ```
 
 > После установки проверьте:
 >
 > ```bash
-> backup-redis --help
+> redis-backup --help
 > ```
