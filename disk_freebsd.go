@@ -10,8 +10,8 @@ func diskUsage(path string) (total, free int64, err error) {
 	if err = unix.Statfs(path, &st); err != nil {
 		return
 	}
-	b := int64(st.F_bsize) // размер блока
-	total = int64(st.F_blocks) * b
-	free = int64(st.F_bavail) * b
+	b := int64(st.Bsize)         // размер блока
+	total = int64(st.Blocks) * b // общий объём
+	free = int64(st.Bavail) * b  // свободно (без учёта root-резерва)
 	return
 }
