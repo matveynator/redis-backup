@@ -106,7 +106,8 @@ func main() {
 func printHelp() {
     exe := filepath.Base(os.Args[0])
 
-    fmt.Printf("%sRedis Backup Utility%s\n\n", cyan, reset)
+    fmt.Printf("%s🚀 Smart & Friendly Redis Backup Tool%s\n", cyan, reset)
+	fmt.Printf("%sBuilt by CHICHA — good dog, great backups. 🐕💾%s\n\n", cyan, reset)
     fmt.Printf("%sUSAGE%s\n  %s [flags]\n\n", cyan, reset, exe)
 
     fmt.Printf("%sGENERAL FLAGS%s\n", cyan, reset)
@@ -115,7 +116,7 @@ func printHelp() {
     fmt.Println("  --backup-path <dir>       Root directory for backups (default: /backup)")
     fmt.Println("  --days <n>                Days to keep local daily backups (default: 30)")
 
-    fmt.Printf("%sBACKUP CONTROL%s\n", cyan, reset)
+    fmt.Printf("%sBACKUP CONTROL and MONITORING%s\n", cyan, reset)
     fmt.Println("  --exclude-ports <csv>     Comma‑separated list of Redis ports NOT to back up")
     fmt.Println("  --check <hours>           Verify freshness/size; CRITICAL if older than <hours>")
 
