@@ -604,15 +604,23 @@ func cleanupOldFilesFTP(c *ftp.ServerConn, dir string, days int) {
 
 /********************** CHECK MODE ********************/
 func runCheckMode() {
-	problems := []string{}
-	severity := 0 // 0-OK, 1-WARNING, 2-CRITICAL
+	// —--- разбираем конфигурацию FTP, если она есть
+	if _, err := os.Stat(ftpConfFile); err == nil {
+		_ = parseFTPConf(ftpConfFile)
+	}
+	if ftpHost != "" { // могли переопределить флагами
+		ftpEnabled = true
+	}
 
 	host, _ := os.Hostname()
 	now := time.Now()
-	threshold := now.Add(-time.Duration(checkHours) * time.Hour)
+	threshold := now.Add(-time.Duration(checkHours) * time.Hour) // «свежесть» бэкапа
 
-	// -------- суммарный объём каталога хоста ----------
-	totalSize, _ := dirSize(filepath.Join(backupPath, host, backupSubdir)) // ← путь с backupSubdir
+	problems := []string{}
+	severity := 0 // 0-OK, 1-WARNING, 2-CRITICAL
+
+	/************* ЛОКАЛЬНЫЕ БЭКАПЫ *************/
+	totalSize, _ := dirSize(filepath.Join(backupPath, host, backupSubdir))
 
 	var latestSetSize int64
 	var latestFiles int
@@ -624,7 +632,7 @@ func runCheckMode() {
 		}
 
 		inst := "redis_" + port
-		dailyDir := filepath.Join(backupPath, host, backupSubdir, inst, "daily") // ←
+		dailyDir := filepath.Join(backupPath, host, backupSubdir, inst, "daily")
 		latestFile, latestMTime := findLatestArchive(dailyDir)
 
 		if latestFile == "" {
@@ -652,16 +660,19 @@ func runCheckMode() {
 		}
 	}
 
-	// -------- дисковая статистика / пороги -----------
+	/************* ДИСК *************/
 	var copiesPossible int64
+	var diskFree, diskTotal int64
+	var usedPct float64
 	if latestSetSize > 0 {
-		diskTotal, diskFree, errDisk := diskUsage(backupPath)
+		var errDisk error
+		diskTotal, diskFree, errDisk = diskUsage(backupPath)
 		if errDisk != nil {
 			problems = append(problems, fmt.Sprintf("disk stat: %v", errDisk))
 		}
 
 		copiesPossible = diskFree / latestSetSize
-		usedPct := float64(totalSize) / float64(diskTotal) * 100
+		usedPct = float64(totalSize) / float64(diskTotal) * 100
 
 		if copiesPossible < 5 || usedPct >= 90 {
 			severity = max(severity, 2)
@@ -670,29 +681,113 @@ func runCheckMode() {
 			severity = max(severity, 1)
 			problems = append(problems, "disk pressure WARNING")
 		}
+	}
 
-		fmt.Printf(
-			"Backups total: %.1f MB (%d files); full set: %.1f MB; free: %.1f MB; "+
-				"can store ≈ %d full sets; used by backups: %.1f%%\n",
-			humanMB(totalSize), latestFiles, humanMB(latestSetSize),
-			humanMB(diskFree), copiesPossible, usedPct)
+	/************* FTP-БЭКАПЫ (если задействован FTP) *************/
+	var ftpLatestSetSize int64
+	var ftpLatestFiles int
+	if ftpEnabled {
+		c, err := ftp.Dial(ftpHost+":21", ftp.DialWithTimeout(5*time.Second))
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("FTP connect: %v", err))
+			severity = max(severity, 2)
+		} else {
+			if err := c.Login(ftpUser, ftpPass); err != nil {
+				problems = append(problems, fmt.Sprintf("FTP login: %v", err))
+				severity = max(severity, 2)
+			} else {
+				for _, port := range ports {
+					if _, skip := excludePorts[port]; skip {
+						continue
+					}
+					remoteDaily := filepath.ToSlash(filepath.Join("/",
+						host, backupSubdir, "redis_"+port, "daily"))
+					latestPath, latestSize, latestTime := findLatestFTPArchive(c, remoteDaily)
 
-	} else {
-		fmt.Println("No backups found at all")
-		severity = 2
+					if latestPath == "" {
+						problems = append(problems,
+							fmt.Sprintf("FTP redis %s: NO BACKUP", port))
+						severity = max(severity, 2)
+						continue
+					}
+					if latestTime.Before(threshold) {
+						problems = append(problems,
+							fmt.Sprintf("FTP redis %s: older than %d h", port, checkHours))
+						severity = max(severity, 2)
+					}
+
+					ftpLatestSetSize += latestSize
+					ftpLatestFiles++
+				}
+			}
+			_ = c.Quit()
+		}
+	}
+
+	/************* КРАСИВЫЕ СТРОКИ МЕТРИК *************/
+	localMetrics := fmt.Sprintf(
+		"Backups total: %.1f MB (%d files); full set: %.1f MB; free: %.1f MB; can store ≈ %d full sets; used by backups: %.1f%%",
+		humanMB(totalSize), latestFiles, humanMB(latestSetSize),
+		humanMB(diskFree), copiesPossible, usedPct)
+
+	ftpMetrics := ""
+	if ftpEnabled && ftpLatestFiles > 0 {
+		ftpMetrics = fmt.Sprintf("FTP latest full set: %.1f MB (%d files)",
+			humanMB(ftpLatestSetSize), ftpLatestFiles)
+	}
+
+	/************* ВЫВОД ДЛЯ NAGIOS: СТАТУС → ДЕТАЛИ *************/
+	var statusText string
+	switch severity {
+	case 2:
+		statusText = "CRITICAL"
+	case 1:
+		statusText = "WARNING"
+	default:
+		statusText = "OK"
+	}
+
+	details := "all redis backups fresh and sufficiently sized. 👍"
+	if len(problems) > 0 {
+		details = strings.Join(problems, "; ")
+	}
+
+	fmt.Printf("%s: %s\n", statusText, details) // ← сначала статус
+	fmt.Println(localMetrics)
+	if ftpMetrics != "" {
+		fmt.Println(ftpMetrics)
 	}
 
 	switch severity {
 	case 2:
-		fmt.Printf("CRITICAL: %s\n", strings.Join(problems, "; "))
 		os.Exit(2)
 	case 1:
-		fmt.Printf("WARNING: %s\n", strings.Join(problems, "; "))
 		os.Exit(1)
 	default:
-		fmt.Println("OK: all redis backups fresh and sufficiently sized")
 		os.Exit(0)
 	}
+}
+
+/***************** FTP helper: свежий архив *****************/
+func findLatestFTPArchive(c *ftp.ServerConn, dir string) (string, int64, time.Time) {
+	entries, err := c.List(dir)
+	if err != nil || len(entries) == 0 {
+		return "", 0, time.Time{}
+	}
+	var newest string
+	var newestTime time.Time
+	var newestSize int64
+	for _, e := range entries {
+		if e.Type != ftp.EntryTypeFile || !strings.HasSuffix(e.Name, ".tar.gz") {
+			continue
+		}
+		if e.Time.After(newestTime) {
+			newestTime = e.Time
+			newest = filepath.ToSlash(filepath.Join(dir, e.Name))
+			newestSize = int64(e.Size)
+		}
+	}
+	return newest, newestSize, newestTime
 }
 
 func max(a, b int) int {
