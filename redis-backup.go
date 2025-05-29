@@ -10,6 +10,7 @@ import (
     "log"
     "os"
     "os/exec"
+	"os/signal"
     "path/filepath"
     "strconv"
     "strings"
@@ -51,6 +52,8 @@ const (
     reset  = "\033[0m"
 )
 
+const lockFile = "/tmp/redis_backup.lock"
+
 func main() {
     // Define flags
     listFlag := flag.Bool("list", false, "List backups and exit")
@@ -88,18 +91,29 @@ func main() {
     }
 
     // Normal operational modes
-    switch {
-    case *helpFlag:
-        printHelp()
-    case *listFlag:
-        listBackups()
-    case *restoreFlag:
-        interactiveRestore()
-    default:
-        // initialisation of FTP (if conf exists or flags supplied)
-        initFTP()
-        runBackup()
-    }
+	switch {
+	case *helpFlag:
+		printHelp()
+	case *listFlag:
+		listBackups()
+	case *restoreFlag:
+		interactiveRestore()
+	case checkHours > 0:
+		runCheckMode()
+
+	default:
+		// ← здесь «боевой» режим
+		acquireLock()
+		// гарантируем снятие лока даже при ^C / kill
+		defer releaseLock()
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		go func() { <-sig; releaseLock(); os.Exit(1) }()
+
+		initFTP()
+		runBackup()
+	}
+
 }
 
 /******************** HELP ********************/
@@ -792,3 +806,39 @@ func cleanupOldFiles(dir string, days int) {
         }
     }
 }
+
+func acquireLock() {
+    try := func() error {
+        f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+        if err != nil {
+            return err          // уже есть файл
+        }
+        defer f.Close()
+        _, _ = f.WriteString(strconv.Itoa(os.Getpid()))
+        return nil             // лока получена
+    }
+
+    if err := try(); err == nil {
+        return
+    }
+
+    // файл существует – проверяем жив ли владелец
+    data, _ := os.ReadFile(lockFile)
+    if pid, _ := strconv.Atoi(strings.TrimSpace(string(data))); pid > 0 {
+        if proc, _ := os.FindProcess(pid); proc != nil &&
+            proc.Signal(syscall.Signal(0)) == nil {
+            log.Fatalf("%sBackup already running (PID %d)%s", red, pid, reset)
+        }
+    }
+
+    // владелец умер – удаляем «висящий» лок и пробуем ещё раз
+    _ = os.Remove(lockFile)
+    if err := try(); err != nil {
+        log.Fatalf("%sCannot create lock file: %v%s", red, err, reset)
+    }
+}
+
+func releaseLock() {
+    _ = os.Remove(lockFile)
+}
+
