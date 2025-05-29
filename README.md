@@ -85,6 +85,112 @@ curl -L https://github.com/matveynator/redis-backup/releases/download/latest/red
 
 ---
 
+Here’s the English translation of your minimalistic guide:
+
+---
+
+## 📦 Redis Backup
+
+```bash
+sudo redis-backup
+```
+
+🔧 By default:
+
+* Backups are saved to:
+  `/backup/<hostname>/redis-backup/redis_<port>/daily/`
+* Archive name format:
+  `YYYY-MM-DD_HH-MM-SS_redis_<port>.tar.gz`
+* Weekly, monthly, and yearly copies are created automatically.
+
+📁 Example directory structure:
+
+```
+/backup/
+└── my-server/
+    └── redis-backup/
+        ├── redis_6379/
+        │   ├── daily/
+        │   ├── weekly/
+        │   └── ...
+        └── redis_6380/
+            └── ...
+```
+
+---
+
+## 🔄 Restore
+
+```bash
+sudo redis-backup --restore
+```
+
+Interactive menu:
+
+1. Choose Redis port (e.g., 6379)
+2. Choose archive
+3. Confirm restore
+
+📌 During restore:
+
+* The current RDB file is renamed to `.backup`
+* The selected archive is extracted into the same directory
+* File permissions are preserved
+
+---
+
+## 📁 Where Backups Are Stored
+
+Locally:
+
+```
+/backup/<hostname>/redis-backup/redis_<port>/daily/*.tar.gz
+```
+
+On FTP (if enabled):
+
+```
+<hostname>/redis-backup/redis_<port>/daily/*.tar.gz
+```
+
+---
+
+## 📋 Example Commands
+
+### Backup Redis, excluding port 6400:
+
+```bash
+sudo redis-backup --exclude-ports 6400
+```
+
+### Freshness check (e.g., 24 hours) for Nagios:
+
+```bash
+redis-backup --check 24
+```
+
+---
+
+## ⚙️ FTP Setup
+
+File: `/etc/ftp-backup.conf`:
+
+```
+FTP_HOST=ftp.example.com
+FTP_USER=myuser
+FTP_PASS=mypass
+```
+
+---
+
+## 🧼 Auto-cleanup
+
+* Locally: old daily archives are deleted after `--days` days (default: 1).
+* On FTP: files are deleted after `days × ftp-keep-factor` (default: ×4 = 4 days).
+
+---
+
+
 ## Русский
 
 ### 📦 Обзор
@@ -162,6 +268,91 @@ curl -L https://github.com/matveynator/redis-backup/releases/download/latest/red
 ```bash
 curl -L https://github.com/matveynator/redis-backup/releases/download/latest/redis-backup_freebsd_amd64 -o /usr/local/bin/redis-backup && chmod +x /usr/local/bin/redis-backup
 ```
+
+---
+
+## 📦 Резервное копирование Redis
+
+sudo redis-backup
+
+🔧 По умолчанию:
+
+* бэкапы сохраняются в:
+  /backup/<hostname>/redis-backup/redis_<порт>/daily/
+* название архива:
+  YYYY-MM-DD_HH-MM-SS_redis_<порт>.tar.gz
+* также автоматически создаются еженедельные, ежемесячные и годовые копии.
+
+📁 Пример расположения:
+
+/backup/
+└── my-server/
+    └── redis-backup/
+        ├── redis_6379/
+        │   ├── daily/
+        │   ├── weekly/
+        │   └── ...
+        └── redis_6380/
+            └── ...
+
+---
+
+## 🔄 Восстановление
+
+sudo redis-backup --restore
+
+Интерактивное меню:
+
+1. Выбор порта Redis (например, 6379)
+2. Выбор нужного архива
+3. Подтверждение восстановления
+
+📌 При восстановлении:
+
+* текущий RDB-файл переименовывается в .backup
+* новый файл распаковывается из архива в ту же папку
+* права доступа сохраняются
+
+---
+
+## 📁 Где лежат бэкапы
+
+Локально:
+
+/backup/<hostname>/redis-backup/redis_<port>/daily/*.tar.gz
+
+На FTP (если включено):
+
+<hostname>/redis-backup/redis_<port>/daily/*.tar.gz
+
+---
+
+## 📋 Примерные команды
+
+### Бэкап Redis, кроме портов 6400:
+
+sudo redis-backup --exclude-ports 6400
+
+### Проверка свежести (например, 24 часа) для Nagios:
+
+redis-backup --check 24
+
+---
+
+## ⚙️ Настройка FTP
+
+Файл /etc/ftp-backup.conf:
+
+FTP_HOST=ftp.example.com
+FTP_USER=myuser
+FTP_PASS=mypass
+
+---
+
+## 🧼 Автоудаление
+
+* Локально: старые daily-архивы удаляются через --days дней (по умолчанию 1).
+* На FTP: удаление производится по формуле days × ftp-keep-factor (по умолчанию ×4 = 4 дней).
 
 ---
 
