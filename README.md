@@ -1,5 +1,5 @@
 <img src="https://repository-images.githubusercontent.com/991835536/72ff229d-e789-4fc8-883d-53439aab3c0d" align="right" width="50%">
-## 🇬🇧 How to use `redis-backup` / <a href="?tab=readme-ov-file#-как-пользоваться-redis-backup"> 🇷🇺 Как пользоваться `redis-backup`</a>
+## 🇬🇧 How to use `redis-backup` / <a href="#-как-пользоваться-redis-backup"> 🇷🇺 Как пользоваться `redis-backup`</a>
 
 ### 📦 Overview
 
