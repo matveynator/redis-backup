@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,6 +31,7 @@ import (
 var (
 	backupPath string // root directory for all backups
 	keepDays   int    // daily retention in days (local)
+	maxCopies  int    // leave only <n> newest daily *.tar.gz (0 = unlimited)
 
 	// FTP related
 	ftpConfFile   string
@@ -67,6 +69,8 @@ func main() {
 
 	flag.StringVar(&backupPath, "backup-path", "/backup", "Root directory for backups")
 	flag.IntVar(&keepDays, "days", 30, "Days to keep daily backups (local)")
+	flag.IntVar(&maxCopies, "copies", 0, "Max number of daily snapshots to keep (0 = unlimited)")
+	flag.IntVar(&maxCopies, "c", 0, "Alias for --copies")
 
 	// New: exclusion list and check
 	flag.StringVar(&excludePortsCSV, "exclude-ports", "", "Comma-separated list of Redis ports to skip during backup/check")
@@ -134,6 +138,7 @@ func printHelp() {
 	fmt.Println("  --restore                 Start interactive restore wizard")
 	fmt.Println("  --backup-path <dir>       Root directory for backups (default: /backup)")
 	fmt.Println("  --days <n>                Days to keep local daily backups (default: 30)")
+	fmt.Println("  --copies, -c <n>          Keep only <n> newest daily backups (0 = unlimited)")
 
 	fmt.Printf("%sBACKUP CONTROL and MONITORING%s\n", cyan, reset)
 	fmt.Println("  --exclude-ports <csv>     Comma‑separated list of Redis ports NOT to back up")
@@ -296,6 +301,11 @@ func runBackup() {
 			continue
 		}
 
+		if !isRedisHealthy(port) {
+			log.Printf("%sRedis %s is not readable – skipping backup%s", yellow, port, reset)
+			continue
+		}
+
 		dir := getRedisDir(port)
 		file := getRedisRDB(port)
 		if dir == "" || file == "" {
@@ -420,7 +430,12 @@ func backupInstance(port, rdbPath, host string, now time.Time) string {
 		copyFile(archive, filepath.Join(yearly, filepath.Base(archive)))
 	}
 
-	cleanupOldFiles(daily, keepDays)
+	if maxCopies > 0 {
+		rotateCopies(daily, maxCopies)
+	} else {
+		cleanupOldFiles(daily, keepDays)
+	}
+
 	return archive
 }
 
@@ -1016,3 +1031,32 @@ func dirSize(root string) (int64, error) {
 }
 
 func humanMB(b int64) float64 { return float64(b) / (1024 * 1024) }
+
+// isRedisHealthy returns true if redis-cli PING returns PONG *and* SAVE succeeds.
+func isRedisHealthy(port string) bool {
+	out, err := exec.Command("redis-cli", "-p", port, "--raw", "PING").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "PONG" {
+		return false
+	}
+	if _, err := exec.Command("redis-cli", "-p", port, "SAVE").Output(); err != nil {
+		return false
+	}
+	return true
+}
+
+// rotateCopies keeps only <copies> newest *.tar.gz in dir.
+func rotateCopies(dir string, copies int) {
+	files, _ := filepath.Glob(filepath.Join(dir, "*.tar.gz"))
+	if len(files) <= copies {
+		return
+	}
+	sort.Slice(files, func(i, j int) bool {
+		fi, _ := os.Stat(files[i])
+		fj, _ := os.Stat(files[j])
+		return fi.ModTime().After(fj.ModTime())
+	})
+	for _, f := range files[copies:] {
+		log.Printf("🧹 Deleting extra archive %s", filepath.Base(f))
+		_ = os.Remove(f)
+	}
+}
