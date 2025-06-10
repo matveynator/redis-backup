@@ -34,12 +34,13 @@ var (
 	maxCopies  int    // leave only <n> newest daily *.tar.gz (0 = unlimited)
 
 	// FTP related
-	ftpConfFile   string
-	ftpHost       string
-	ftpUser       string
-	ftpPass       string
-	ftpKeepFactor int // remote retention multiplier
-	ftpEnabled    bool
+	ftpConfFile          string
+	ftpHost              string
+	ftpUser              string
+	ftpPass              string
+	ftpKeepFactor        int // remote retention multiplier
+	ftpEnabled           bool
+	ftpKeepFactorFlagged bool
 
 	// other runtime flags
 	excludePortsCSV string
@@ -84,6 +85,20 @@ func main() {
 	flag.IntVar(&ftpKeepFactor, "ftp-keep-factor", 4, "Retention multiplier for FTP (remoteKeepDays = keepDays * factor)")
 
 	flag.Parse()
+
+	// Отмечаем, задавал ли пользователь --ftp-keep-factor вручную
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "ftp-keep-factor" {
+			ftpKeepFactorFlagged = true
+		}
+	})
+
+	// Если локально храним только одну копию и пользователь
+	// НЕ трогал --ftp-keep-factor, то увеличиваем окно хранения на FTP ×4
+	if !ftpKeepFactorFlagged && maxCopies == 1 {
+		// 4 × больше, чем локально
+		ftpKeepFactor = 4
+	}
 
 	// Prepare exclusion map
 	excludePorts = make(map[string]struct{})
