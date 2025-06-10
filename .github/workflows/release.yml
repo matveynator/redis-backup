@@ -1,13 +1,9 @@
 # .github/workflows/release.yml
-# Build «redis-backup» статическими бинарниками (CGO_DISABLED),
-# выпуск в GitHub Release «latest» при коммите с фразой `stable release`.
-
 name: Build and Release Stable
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
 
 permissions:
   contents: write
@@ -35,9 +31,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Isolate Go module cache
+      # Уникальный каталог для модулей — зависит от GOOS/GOARCH
+      - name: Define isolated Go module cache
         run: |
           echo "GOMODCACHE=$HOME/.gomodcache-${{ matrix.goos }}-${{ matrix.goarch }}" >> $GITHUB_ENV
+
+      # ⚠️ Подготавливаем/очищаем каталог, иначе tar => exit 2
+      - name: Prepare module cache dir
+        run: |
+          rm -rf "$GOMODCACHE" || true
+          mkdir -p "$GOMODCACHE"
 
       - name: Init go.mod if absent
         run: |
@@ -52,7 +55,7 @@ jobs:
 
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }} (static)
         env:
-          GOOS:   ${{ matrix.goos }}
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
           VERSION: ${{ github.sha }}
@@ -87,3 +90,4 @@ jobs:
           name: "Latest Stable Release"
           prerelease: false
           files: dist-raw/**/*
+
