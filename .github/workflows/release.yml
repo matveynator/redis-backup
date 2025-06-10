@@ -9,13 +9,11 @@ on:
     branches:
       - main
 
-# токену нужен доступ на запись (создаём/обновляем релиз)
 permissions:
   contents: write
 
 jobs:
   build:
-    # Запуск только когда сообщение коммита содержит 'stable release'
     if: contains(toJson(github.event.head_commit.message), 'stable release')
     runs-on: ubuntu-latest
 
@@ -36,30 +34,27 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Isolate Go module cache
         run: |
           echo "GOMODCACHE=$HOME/.gomodcache-${{ matrix.goos }}-${{ matrix.goarch }}" >> $GITHUB_ENV
 
-      # создаём минимальный go.mod, если проекта ещё нет в модулях
       - name: Init go.mod if absent
         run: |
           test -f go.mod || go mod init redis-backup
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.22"
           cache: true
           cache-dependency-path: go.sum
-          # ключ включает GOOS/GOARCH → кэш не будет конфликтовать
-          cache-key: |
-            gomod-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}
 
-      # 🔨 СТАТИЧЕСКАЯ СБОРКА (CGO_ENABLED=0)
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }} (static)
         env:
           GOOS:   ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0                    # статический бинарь
+          CGO_ENABLED: 0
           VERSION: ${{ github.sha }}
         run: |
           mkdir -p dist
@@ -68,7 +63,6 @@ jobs:
                    -ldflags "-s -w -X main.version=$VERSION" \
                    -o "dist/redis-backup_${GOOS}_${GOARCH}"
 
-      # каждый артефакт — уникальное имя → нет 409 conflicts
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -93,4 +87,3 @@ jobs:
           name: "Latest Stable Release"
           prerelease: false
           files: dist-raw/**/*
-
