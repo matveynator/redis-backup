@@ -48,6 +48,14 @@ var (
 	checkHours      int
 )
 
+type ftpAccount struct {
+	Host string
+	User string
+	Pass string
+}
+
+var ftpAccounts []ftpAccount
+
 // internal helpers derived from flags
 var excludePorts map[string]struct{}
 
@@ -515,26 +523,26 @@ func restoreBackup(port, archiveName string) {
 
 /********************** FTP ***************************/
 func initFTP() {
-	// Determine if ftp should be enabled
+	// 1) читаем конфиг-файл, если есть
 	if _, err := os.Stat(ftpConfFile); err == nil {
-		// parse file
-		if err := parseFTPConf(ftpConfFile); err != nil {
-			log.Printf("%sUnable to parse FTP conf: %v. FTP disabled.%s", red, err, reset)
-			ftpEnabled = false
-			return
-		}
+		_ = parseFTPConf(ftpConfFile)
 	}
 
-	// Overrides from flags if provided
+	// 2) если заданы флаги host/user/pass – считаем их высшим приоритетом
 	if ftpHost != "" {
-		ftpEnabled = true
+		ftpAccounts = []ftpAccount{{Host: ftpHost, User: ftpUser, Pass: ftpPass}}
 	}
 
+	ftpEnabled = len(ftpAccounts) > 0
 	if !ftpEnabled {
 		return
 	}
 
-	log.Printf("%s🌐 FTP replication enabled → %s%s", cyan, ftpHost, reset)
+	// 3) выводим все таргеты
+	for _, acc := range ftpAccounts {
+		log.Printf("%s🌐 FTP replication target → %s (user %s)%s",
+			cyan, acc.Host, acc.User, reset)
+	}
 }
 
 func parseFTPConf(path string) error {
@@ -543,50 +551,56 @@ func parseFTPConf(path string) error {
 		return err
 	}
 	defer f.Close()
+
+	var cur ftpAccount
+	commit := func() {
+		if cur.Host != "" && cur.User != "" && cur.Pass != "" {
+			ftpAccounts = append(ftpAccounts, cur)
+		}
+		cur = ftpAccount{}
+	}
+
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if !strings.Contains(line, "=") {
+		if line == "" || strings.HasPrefix(line, "#") || !strings.Contains(line, "=") {
 			continue
 		}
 		kv := strings.SplitN(line, "=", 2)
 		key := strings.Trim(kv[0], " \"")
 		val := strings.Trim(kv[1], " \"")
+
 		switch key {
 		case "FTP_HOST":
-			ftpHost = val
+			// при смене хоста сохраняем предыдущий блок
+			if cur.Host != "" {
+				commit()
+			}
+			cur.Host = val
 		case "FTP_USER":
-			ftpUser = val
+			cur.User = val
 		case "FTP_PASS":
-			ftpPass = val
+			cur.Pass = val
 		}
 	}
-	if ftpHost != "" {
-		ftpEnabled = true
-	}
+	commit() // последний блок
 	return scanner.Err()
 }
 
-func uploadToFTP(localPath, remoteRel string) {
-	if !ftpEnabled {
-		return
-	}
-	c, err := ftp.Dial(ftpHost + ":21")
+func uploadToSingleFTP(acc ftpAccount, localPath, remoteRel string) {
+	c, err := ftp.Dial(acc.Host + ":21")
 	if err != nil {
-		log.Printf("%sFTP dial: %v%s", red, err, reset)
+		log.Printf("%sFTP dial %s: %v%s", red, acc.Host, err, reset)
 		return
 	}
 	defer c.Quit()
 
-	if err := c.Login(ftpUser, ftpPass); err != nil {
-		log.Printf("%sFTP login: %v%s", red, err, reset)
+	if err := c.Login(acc.User, acc.Pass); err != nil {
+		log.Printf("%sFTP login %s: %v%s", red, acc.Host, err, reset)
 		return
 	}
 
-	// Ensure remote directories exist
+	// создаём директории
 	parts := strings.Split(filepath.Dir(remoteRel), string(os.PathSeparator))
 	cwd := "/"
 	for _, p := range parts {
@@ -605,25 +619,30 @@ func uploadToFTP(localPath, remoteRel string) {
 	defer f.Close()
 
 	remotePath := filepath.ToSlash(remoteRel)
-	log.Printf("%s⇪ Uploading to FTP: %s%s", cyan, remotePath, reset)
+	log.Printf("%s⇪ Uploading to %s: %s%s", cyan, acc.Host, remotePath, reset)
 	if err := c.Stor(remotePath, f); err != nil {
-		log.Printf("%sFTP upload error: %v%s", red, err, reset)
+		log.Printf("%sFTP upload %s: %v%s", red, acc.Host, err, reset)
 		return
 	}
 
-	// Remote retention cleanup (only for daily archives)
+	// ротация
 	if strings.Contains(remotePath, "/daily/") {
 		remoteDailyDir := filepath.ToSlash(filepath.Dir(remotePath))
-
 		if maxCopies > 0 {
-			// пример: локально 1 копия, ftp-keep-factor 4 → храним 4 копии
 			rotateCopiesFTP(c, remoteDailyDir, maxCopies*ftpKeepFactor)
 		} else {
-			// классический режим «по дням»
 			cleanupOldFilesFTP(c, remoteDailyDir, keepDays*ftpKeepFactor)
 		}
 	}
+}
 
+func uploadToFTP(localPath, remoteRel string) {
+	if !ftpEnabled {
+		return
+	}
+	for _, acc := range ftpAccounts {
+		uploadToSingleFTP(acc, localPath, remoteRel)
+	}
 }
 
 func cleanupOldFilesFTP(c *ftp.ServerConn, dir string, days int) {
@@ -650,6 +669,11 @@ func runCheckMode() {
 	if _, err := os.Stat(ftpConfFile); err == nil {
 		_ = parseFTPConf(ftpConfFile)
 	}
+
+	if len(ftpAccounts) > 0 {
+		ftpEnabled = true
+	}
+
 	if ftpHost != "" { // могли переопределить флагами
 		ftpEnabled = true
 	}
@@ -728,64 +752,66 @@ func runCheckMode() {
 	/************* FTP-БЭКАПЫ (если задействован FTP) *************/
 	var ftpLatestSetSize int64
 	var ftpLatestFiles int
-	// ===== СКОЛЬКО архивов должно быть на FTP
-	expectedFtpCopies := 0
-	if maxCopies > 0 {
-		expectedFtpCopies = maxCopies * ftpKeepFactor
-	}
-
 	if ftpEnabled {
-		c, err := ftp.Dial(ftpHost+":21", ftp.DialWithTimeout(5*time.Second))
-		if err != nil {
-			problems = append(problems, fmt.Sprintf("FTP connect: %v", err))
-			severity = max(severity, 2)
-		} else {
-			if err := c.Login(ftpUser, ftpPass); err != nil {
-				problems = append(problems, fmt.Sprintf("FTP login: %v", err))
+		expectedFtpCopies := 0
+		if maxCopies > 0 {
+			expectedFtpCopies = maxCopies * ftpKeepFactor
+		}
+
+		for _, acc := range ftpAccounts {
+			c, err := ftp.Dial(acc.Host+":21", ftp.DialWithTimeout(5*time.Second))
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("FTP connect %s: %v", acc.Host, err))
 				severity = max(severity, 2)
-			} else {
-				for _, port := range ports {
-					if _, skip := excludePorts[port]; skip {
-						continue
-					}
-					remoteDaily := filepath.ToSlash(filepath.Join("/",
-						host, backupSubdir, "redis_"+port, "daily"))
-					latestPath, latestSize, latestTime := findLatestFTPArchive(c, remoteDaily)
+				continue
+			}
+			if err := c.Login(acc.User, acc.Pass); err != nil {
+				problems = append(problems, fmt.Sprintf("FTP login %s: %v", acc.Host, err))
+				severity = max(severity, 2)
+				_ = c.Quit()
+				continue
+			}
 
-					// -----------------------------------------------------------------
-					// проверяем, что на FTP лежит нужное число копий
-					if expectedFtpCopies > 0 {
-						entries, _ := c.List(remoteDaily)
-						var cnt int
-						for _, e := range entries {
-							if e.Type == ftp.EntryTypeFile && strings.HasSuffix(e.Name, ".tar.gz") {
-								cnt++
-							}
-						}
-						if cnt < expectedFtpCopies {
-							problems = append(problems,
-								fmt.Sprintf("FTP redis %s: only %d/%d copies", port, cnt, expectedFtpCopies))
-							// здесь WARNING (1) — сигнализируем, но не «красим» в CRITICAL
-							severity = max(severity, 1)
-						}
-					}
-					// -----------------------------------------------------------------
-
-					if latestPath == "" {
-						problems = append(problems,
-							fmt.Sprintf("FTP redis %s: NO BACKUP", port))
-						severity = max(severity, 2)
-						continue
-					}
-					if latestTime.Before(threshold) {
-						problems = append(problems,
-							fmt.Sprintf("FTP redis %s: older than %d h", port, checkHours))
-						severity = max(severity, 2)
-					}
-
-					ftpLatestSetSize += latestSize
-					ftpLatestFiles++
+			for _, port := range ports {
+				if _, skip := excludePorts[port]; skip {
+					continue
 				}
+				remoteDaily := filepath.ToSlash(filepath.Join("/",
+					host, backupSubdir, "redis_"+port, "daily"))
+
+				// свежий архив
+				latestPath, latestSize, latestTime := findLatestFTPArchive(c, remoteDaily)
+				if latestPath == "" {
+					problems = append(problems,
+						fmt.Sprintf("FTP %s redis %s: NO BACKUP", acc.Host, port))
+					severity = max(severity, 2)
+					continue
+				}
+				if latestTime.Before(threshold) {
+					problems = append(problems,
+						fmt.Sprintf("FTP %s redis %s: older than %d h", acc.Host, port, checkHours))
+					severity = max(severity, 2)
+				}
+
+				// количество копий
+				if expectedFtpCopies > 0 {
+					entries, _ := c.List(remoteDaily)
+					var cnt int
+					for _, e := range entries {
+						if e.Type == ftp.EntryTypeFile && strings.HasSuffix(e.Name, ".tar.gz") {
+							cnt++
+						}
+					}
+					if cnt < expectedFtpCopies {
+						problems = append(problems,
+							fmt.Sprintf("FTP %s redis %s: only %d/%d copies",
+								acc.Host, port, cnt, expectedFtpCopies))
+						severity = max(severity, 1) // warning
+					}
+				}
+
+				ftpLatestSetSize += latestSize
+				ftpLatestFiles++
 			}
 			_ = c.Quit()
 		}
