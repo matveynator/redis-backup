@@ -29,9 +29,10 @@ import (
 
 // Runtime-overrideable defaults
 var (
-	backupPath string // root directory for all backups
-	keepDays   int    // daily retention in days (local)
-	maxCopies  int    // leave only <n> newest daily *.tar.gz (0 = unlimited)
+	backupPath     string // root directory for all backups
+	keepDays       int    // daily retention in days (local)
+	maxCopies      int    // leave only <n> newest daily *.tar.gz (0 = unlimited)
+	saveTimeoutSec int    // how long to wait for BGSAVE to finish
 
 	// FTP related
 	ftpConfFile          string
@@ -71,6 +72,8 @@ func main() {
 	flag.StringVar(&backupPath, "backup-path", "/backup", "Root directory for backups")
 	flag.IntVar(&keepDays, "days", 30, "Days to keep daily backups (local)")
 	flag.IntVar(&maxCopies, "copies", 0, "Max number of daily snapshots to keep (0 = unlimited)")
+	flag.IntVar(&saveTimeoutSec, "save-timeout", 600, "Seconds to wait until Redis finishes BGSAVE (default: 600)")
+
 	flag.IntVar(&maxCopies, "c", 0, "Alias for --copies")
 
 	// New: exclusion list and check
@@ -154,6 +157,7 @@ func printHelp() {
 	fmt.Println("  --backup-path <dir>       Root directory for backups (default: /backup)")
 	fmt.Println("  --days <n>                Days to keep local daily backups (default: 30)")
 	fmt.Println("  --copies, -c <n>          Keep only <n> newest daily backups (0 = unlimited)")
+	fmt.Println("  --save-timeout <sec>      Max seconds to wait for BGSAVE (default: 600)")
 
 	fmt.Printf("%sBACKUP CONTROL and MONITORING%s\n", cyan, reset)
 	fmt.Println("  --exclude-ports <csv>     Comma‑separated list of Redis ports NOT to back up")
@@ -610,8 +614,16 @@ func uploadToFTP(localPath, remoteRel string) {
 	// Remote retention cleanup (only for daily archives)
 	if strings.Contains(remotePath, "/daily/") {
 		remoteDailyDir := filepath.ToSlash(filepath.Dir(remotePath))
-		cleanupOldFilesFTP(c, remoteDailyDir, keepDays*ftpKeepFactor)
+
+		if maxCopies > 0 {
+			// пример: локально 1 копия, ftp-keep-factor 4 → храним 4 копии
+			rotateCopiesFTP(c, remoteDailyDir, maxCopies*ftpKeepFactor)
+		} else {
+			// классический режим «по дням»
+			cleanupOldFilesFTP(c, remoteDailyDir, keepDays*ftpKeepFactor)
+		}
 	}
+
 }
 
 func cleanupOldFilesFTP(c *ftp.ServerConn, dir string, days int) {
@@ -716,6 +728,12 @@ func runCheckMode() {
 	/************* FTP-БЭКАПЫ (если задействован FTP) *************/
 	var ftpLatestSetSize int64
 	var ftpLatestFiles int
+	// ===== СКОЛЬКО архивов должно быть на FTP
+	expectedFtpCopies := 0
+	if maxCopies > 0 {
+		expectedFtpCopies = maxCopies * ftpKeepFactor
+	}
+
 	if ftpEnabled {
 		c, err := ftp.Dial(ftpHost+":21", ftp.DialWithTimeout(5*time.Second))
 		if err != nil {
@@ -733,6 +751,25 @@ func runCheckMode() {
 					remoteDaily := filepath.ToSlash(filepath.Join("/",
 						host, backupSubdir, "redis_"+port, "daily"))
 					latestPath, latestSize, latestTime := findLatestFTPArchive(c, remoteDaily)
+
+					// -----------------------------------------------------------------
+					// проверяем, что на FTP лежит нужное число копий
+					if expectedFtpCopies > 0 {
+						entries, _ := c.List(remoteDaily)
+						var cnt int
+						for _, e := range entries {
+							if e.Type == ftp.EntryTypeFile && strings.HasSuffix(e.Name, ".tar.gz") {
+								cnt++
+							}
+						}
+						if cnt < expectedFtpCopies {
+							problems = append(problems,
+								fmt.Sprintf("FTP redis %s: only %d/%d copies", port, cnt, expectedFtpCopies))
+							// здесь WARNING (1) — сигнализируем, но не «красим» в CRITICAL
+							severity = max(severity, 1)
+						}
+					}
+					// -----------------------------------------------------------------
 
 					if latestPath == "" {
 						problems = append(problems,
@@ -1047,16 +1084,46 @@ func dirSize(root string) (int64, error) {
 
 func humanMB(b int64) float64 { return float64(b) / (1024 * 1024) }
 
-// isRedisHealthy returns true if redis-cli PING returns PONG *and* SAVE succeeds.
+// isRedisHealthy triggers BGSAVE and waits until it finishes.
+// Returns true if Redis answers PING and creates a fresh RDB
+// within --save-timeout seconds.
 func isRedisHealthy(port string) bool {
+	// 1) простой PING
 	out, err := exec.Command("redis-cli", "-p", port, "--raw", "PING").Output()
 	if err != nil || strings.TrimSpace(string(out)) != "PONG" {
 		return false
 	}
-	if _, err := exec.Command("redis-cli", "-p", port, "SAVE").Output(); err != nil {
+
+	// 2) время последнего успешного сохранения
+	beforeStr, err := exec.Command("redis-cli", "-p", port, "--raw", "LASTSAVE").Output()
+	if err != nil {
 		return false
 	}
-	return true
+	before, _ := strconv.ParseInt(strings.TrimSpace(string(beforeStr)), 10, 64)
+
+	// 3) запускаем BGSAVE (игнорируем «save in progress»-ошибку)
+	_, _ = exec.Command("redis-cli", "-p", port, "BGSAVE").Output()
+
+	// 4) ждём, пока LASTSAVE станет новее
+	deadline := time.Now().Add(time.Duration(saveTimeoutSec) * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		if time.Now().Add(-30 * time.Second).After(deadline) {
+			log.Printf("%s⌛ Redis %s: still waiting for BGSAVE …%s", yellow, port, reset)
+		}
+
+		afterStr, err := exec.Command("redis-cli", "-p", port, "--raw", "LASTSAVE").Output()
+		if err != nil {
+			return false
+		}
+		after, _ := strconv.ParseInt(strings.TrimSpace(string(afterStr)), 10, 64)
+
+		if after > before {
+			return true // дамп готов
+		}
+	}
+	// таймаут: дамп не появился
+	return false
 }
 
 // rotateCopies keeps only <copies> newest *.tar.gz in dir.
@@ -1073,5 +1140,36 @@ func rotateCopies(dir string, copies int) {
 	for _, f := range files[copies:] {
 		log.Printf("🧹 Deleting extra archive %s", filepath.Base(f))
 		_ = os.Remove(f)
+	}
+}
+
+// rotateCopiesFTP keeps only <copies> newest *.tar.gz in an FTP directory.
+func rotateCopiesFTP(c *ftp.ServerConn, dir string, copies int) {
+	entries, err := c.List(dir)
+	if err != nil {
+		return
+	}
+
+	// работаем с указателями
+	var files []*ftp.Entry
+	for _, e := range entries {
+		if e.Type == ftp.EntryTypeFile && strings.HasSuffix(e.Name, ".tar.gz") {
+			files = append(files, e)
+		}
+	}
+	if len(files) <= copies {
+		return // ничего удалять
+	}
+
+	// сортируем по времени: новые → старые
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Time.After(files[j].Time)
+	})
+
+	// удаляем «лишние» файлы
+	for _, e := range files[copies:] {
+		remoteFile := filepath.ToSlash(filepath.Join(dir, e.Name))
+		log.Printf("🧹 (FTP) Deleting extra archive %s", remoteFile)
+		_ = c.Delete(remoteFile)
 	}
 }
