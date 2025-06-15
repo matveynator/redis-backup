@@ -65,29 +65,25 @@ Backups will be uploaded to **each** FTP defined.
 **✅ Linux (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_linux_amd64 -o /usr/local/bin/redis-backup
-chmod +x /usr/local/bin/redis-backup
+curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_linux_amd64 -o /usr/local/bin/redis-backup; chmod +x /usr/local/bin/redis-backup;
 ```
 
 **✅ macOS (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_darwin_amd64 -o /usr/local/bin/redis-backup
-chmod +x /usr/local/bin/redis-backup
+curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_darwin_amd64 -o /usr/local/bin/redis-backup; chmod +x /usr/local/bin/redis-backup;
 ```
 
 **✅ OpenBSD (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_openbsd_amd64 -o /usr/local/bin/redis-backup
-chmod +x /usr/local/bin/redis-backup
+curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_openbsd_amd64 -o /usr/local/bin/redis-backup; chmod +x /usr/local/bin/redis-backup;
 ```
 
 **✅ FreeBSD (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_freebsd_amd64 -o /usr/local/bin/redis-backup
-chmod +x /usr/local/bin/redis-backup
+curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_freebsd_amd64 -o /usr/local/bin/redis-backup; chmod +x /usr/local/bin/redis-backup;
 ```
 
 ---
@@ -199,29 +195,25 @@ FTP_PASS=pass2
 **✅ Linux (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_linux_amd64 -o /usr/local/bin/redis-backup
-chmod +x /usr/local/bin/redis-backup
+curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_linux_amd64 -o /usr/local/bin/redis-backup; chmod +x /usr/local/bin/redis-backup;
 ```
 
 **✅ macOS (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_darwin_amd64 -o /usr/local/bin/redis-backup
-chmod +x /usr/local/bin/redis-backup
+curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_darwin_amd64 -o /usr/local/bin/redis-backup; chmod +x /usr/local/bin/redis-backup;
 ```
 
 **✅ OpenBSD (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_openbsd_amd64 -o /usr/local/bin/redis-backup
-chmod +x /usr/local/bin/redis-backup
+curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_openbsd_amd64 -o /usr/local/bin/redis-backup; chmod +x /usr/local/bin/redis-backup;
 ```
 
 **✅ FreeBSD (amd64)**
 
 ```bash
-curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_freebsd_amd64 -o /usr/local/bin/redis-backup
-chmod +x /usr/local/bin/redis-backup
+curl -L https://github.com/matveynator/redis-backup/releases/latest/download/redis-backup_freebsd_amd64 -o /usr/local/bin/redis-backup; chmod +x /usr/local/bin/redis-backup;
 ```
 
 ---
