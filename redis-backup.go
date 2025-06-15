@@ -361,34 +361,34 @@ func runBackup() {
 /***************** REDIS HELPERS *******************/
 
 func detectRedisPorts() []string {
+	seen := make(map[string]struct{}) // <- новое множество
 	var ports []string
 
-	conns, err := net.Connections("tcp")
+	conns, err := net.Connections("tcp") // tcp4+tcp6 = дубликаты
 	if err != nil {
 		log.Println("net.Connections error:", err)
-		return ports
+		return nil
 	}
 
-	for _, conn := range conns {
-		if conn.Status != "LISTEN" || conn.Pid == 0 {
+	for _, c := range conns {
+		if c.Status != "LISTEN" || c.Pid == 0 || c.Laddr.Port == 0 {
 			continue
 		}
 
-		proc, err := process.NewProcess(conn.Pid)
-		if err != nil {
+		proc, _ := process.NewProcess(c.Pid)
+		name, _ := proc.Name()
+		if !strings.Contains(strings.ToLower(name), "redis-server") {
 			continue
 		}
 
-		name, err := proc.Name()
-		if err != nil || !strings.Contains(strings.ToLower(name), "redis-server") {
-			continue
-		}
-
-		if conn.Laddr.Port != 0 {
-			ports = append(ports, strconv.Itoa(int(conn.Laddr.Port)))
-		}
+		p := strconv.Itoa(int(c.Laddr.Port))
+		seen[p] = struct{}{} // кладём в set
 	}
 
+	for p := range seen { // конвертируем в срез
+		ports = append(ports, p)
+	}
+	sort.Strings(ports) // (чтобы порядок был стабильным)
 	return ports
 }
 
