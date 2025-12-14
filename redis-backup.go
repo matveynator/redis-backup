@@ -7,6 +7,7 @@ import (
 	"archive/tar"
 	"bufio"
 	"compress/gzip"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -444,6 +445,10 @@ func backupInstance(port, rdbPath, host string, now time.Time) string {
 		suggestSudo(err)
 		log.Printf("%sArchive error: %v%s", red, err, reset)
 		return ""
+	}
+	if err := writeBackupMeta(archive, rdbPath); err != nil {
+		// We still keep the backup, but note that verification may be weaker without metadata.
+		log.Printf("%sFailed to store backup metadata for %s: %v%s", yellow, archive, err, reset)
 	}
 	printFileSize(archive)
 
@@ -912,33 +917,94 @@ func findLatestArchive(dir string) (string, time.Time) {
 	return newest, newestTime
 }
 
-func compareSizes(originalPath, archivePath string) (bool, error) {
-	// size of original RDB
-	origInfo, err := os.Stat(originalPath)
-	if err != nil {
-		return true, err // ignore if cannot stat original
-	}
-	origSize := origInfo.Size()
+type backupMeta struct {
+	OriginalSize int64 `json:"original_size"`
+	SnapshotTime int64 `json:"snapshot_time"`
+}
 
-	// extract temp file to check size (stream) – we only need the uncompressed payload of tar entry
+func compareSizes(originalPath, archivePath string) (bool, error) {
+	backupSize, err := archivedPayloadSize(archivePath)
+	if err != nil {
+		return true, err
+	}
+
+	referenceSize, err := referenceRDBSize(originalPath, archivePath)
+	if err != nil {
+		return true, err
+	}
+
+	// We demand near parity (95%) with the captured RDB snapshot to avoid false alarms when the
+	// live dataset has grown after the backup was taken.
+	return float64(backupSize) >= 0.95*float64(referenceSize), nil
+}
+
+func archivedPayloadSize(archivePath string) (int64, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {
-		return true, err
+		return 0, err
 	}
 	defer f.Close()
+
 	gr, err := gzip.NewReader(f)
 	if err != nil {
-		return true, err
+		return 0, err
 	}
 	defer gr.Close()
+
 	tr := tar.NewReader(gr)
 	hdr, err := tr.Next()
 	if err != nil {
-		return true, err
+		return 0, err
 	}
-	backupSize := hdr.Size
 
-	return float64(backupSize) >= 0.75*float64(origSize), nil
+	return hdr.Size, nil
+}
+
+func referenceRDBSize(originalPath, archivePath string) (int64, error) {
+	if meta, err := readBackupMeta(archivePath); err == nil && meta.OriginalSize > 0 {
+		return meta.OriginalSize, nil
+	}
+
+	info, err := os.Stat(originalPath)
+	if err != nil {
+		return 0, err
+	}
+
+	return info.Size(), nil
+}
+
+func writeBackupMeta(archivePath, originalPath string) error {
+	info, err := os.Stat(originalPath)
+	if err != nil {
+		return err
+	}
+
+	meta := backupMeta{
+		OriginalSize: info.Size(),
+		SnapshotTime: info.ModTime().Unix(),
+	}
+
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+
+	// A sidecar file keeps the snapshot facts so later checks compare like for like.
+	return os.WriteFile(archivePath+".meta", append(data, '\n'), 0644)
+}
+
+func readBackupMeta(archivePath string) (backupMeta, error) {
+	data, err := os.ReadFile(archivePath + ".meta")
+	if err != nil {
+		return backupMeta{}, err
+	}
+
+	var meta backupMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return backupMeta{}, err
+	}
+
+	return meta, nil
 }
 
 /********************** FILE OPS **********************/
