@@ -28,23 +28,20 @@ import (
 	"github.com/shirou/gopsutil/v3/process"
 )
 
-// Runtime-overrideable defaults
 var (
-	backupPath     string // root directory for all backups
-	keepDays       int    // daily retention in days (local)
-	maxCopies      int    // leave only <n> newest daily *.tar.gz (0 = unlimited)
-	saveTimeoutSec int    // how long to wait for BGSAVE to finish
+	backupPath     string
+	keepDays       int
+	maxCopies      int
+	saveTimeoutSec int
 
-	// FTP related
 	ftpConfFile          string
 	ftpHost              string
 	ftpUser              string
 	ftpPass              string
-	ftpKeepFactor        int // remote retention multiplier
+	ftpKeepFactor        int
 	ftpEnabled           bool
 	ftpKeepFactorFlagged bool
 
-	// other runtime flags
 	excludePortsCSV string
 	checkHours      int
 )
@@ -56,11 +53,8 @@ type ftpAccount struct {
 }
 
 var ftpAccounts []ftpAccount
-
-// internal helpers derived from flags
 var excludePorts map[string]struct{}
 
-// ANSI colors for terminal logs
 const (
 	green  = "\033[32m"
 	yellow = "\033[33m"
@@ -73,7 +67,6 @@ const lockFile = "/tmp/redis_backup.lock"
 const backupSubdir = "redis-backup"
 
 func main() {
-	// Define flags
 	listFlag := flag.Bool("list", false, "List backups and exit")
 	restoreFlag := flag.Bool("restore", false, "Interactive restore wizard")
 	helpFlag := flag.Bool("help", false, "Show help and exit")
@@ -82,14 +75,9 @@ func main() {
 	flag.IntVar(&keepDays, "days", 30, "Days to keep daily backups (local)")
 	flag.IntVar(&maxCopies, "copies", 0, "Max number of daily snapshots to keep (0 = unlimited)")
 	flag.IntVar(&saveTimeoutSec, "save-timeout", 600, "Seconds to wait until Redis finishes BGSAVE (default: 600)")
-
 	flag.IntVar(&maxCopies, "c", 0, "Alias for --copies")
-
-	// New: exclusion list and check
 	flag.StringVar(&excludePortsCSV, "exclude-ports", "", "Comma-separated list of Redis ports to skip during backup/check")
 	flag.IntVar(&checkHours, "check", 0, "Run integrity check; value = max allowed hours since last backup. 0 disables check mode.")
-
-	// New: FTP options
 	flag.StringVar(&ftpConfFile, "ftp-conf", "/etc/ftp-backup.conf", "Path to FTP credentials file")
 	flag.StringVar(&ftpHost, "ftp-host", "", "Override FTP host (otherwise taken from conf file)")
 	flag.StringVar(&ftpUser, "ftp-user", "", "Override FTP username (otherwise taken from conf file)")
@@ -97,22 +85,15 @@ func main() {
 	flag.IntVar(&ftpKeepFactor, "ftp-keep-factor", 4, "Retention multiplier for FTP (remoteKeepDays = keepDays * factor)")
 
 	flag.Parse()
-
-	// Отмечаем, задавал ли пользователь --ftp-keep-factor вручную
 	flag.Visit(func(f *flag.Flag) {
 		if f.Name == "ftp-keep-factor" {
 			ftpKeepFactorFlagged = true
 		}
 	})
-
-	// Если локально храним только одну копию и пользователь
-	// НЕ трогал --ftp-keep-factor, то увеличиваем окно хранения на FTP ×4
 	if !ftpKeepFactorFlagged && maxCopies == 1 {
-		// 4 × больше, чем локально
 		ftpKeepFactor = 4
 	}
 
-	// Prepare exclusion map
 	excludePorts = make(map[string]struct{})
 	if excludePortsCSV != "" {
 		for _, p := range strings.Split(excludePortsCSV, ",") {
@@ -120,13 +101,11 @@ func main() {
 		}
 	}
 
-	// Check if we are running in check mode first
 	if checkHours > 0 {
 		runCheckMode()
 		return
 	}
 
-	// Normal operational modes
 	switch {
 	case *helpFlag:
 		printHelp()
@@ -134,57 +113,42 @@ func main() {
 		listBackups()
 	case *restoreFlag:
 		interactiveRestore()
-	case checkHours > 0:
-		runCheckMode()
-
 	default:
-		// ← здесь «боевой» режим
 		acquireLock()
-		// гарантируем снятие лока даже при ^C / kill
 		defer releaseLock()
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		go func() { <-sig; releaseLock(); os.Exit(1) }()
-
 		initFTP()
 		runBackup()
 	}
-
 }
 
-/******************** HELP ********************/
 func printHelp() {
 	exe := filepath.Base(os.Args[0])
-
 	fmt.Printf("%s🚀 Smart & Friendly Redis Backup Tool%s\n", cyan, reset)
 	fmt.Printf("%sBuilt by CHICHA — good dog, great backups. 🐕💾%s\n\n", cyan, reset)
 	fmt.Printf("%sUSAGE%s\n  %s [flags]\n\n", cyan, reset, exe)
-
 	fmt.Printf("%sGENERAL FLAGS%s\n", cyan, reset)
 	fmt.Println("  --list                    List existing backups and exit")
 	fmt.Println("  --restore                 Start interactive restore wizard")
 	fmt.Println("  --backup-path <dir>       Root directory for backups (default: /backup)")
 	fmt.Println("  --days <n>                Days to keep local daily backups (default: 30)")
 	fmt.Println("  --copies, -c <n>          Keep only <n> newest daily backups (0 = unlimited)")
-	fmt.Println("  --save-timeout <sec>      Max seconds to wait for BGSAVE (default: 600)")
-
+	fmt.Println("  --save-timeout <sec>      Max seconds to wait until Redis finishes BGSAVE (default: 600)")
 	fmt.Printf("%sBACKUP CONTROL and MONITORING%s\n", cyan, reset)
-	fmt.Println("  --exclude-ports <csv>     Comma‑separated list of Redis ports NOT to back up")
-	fmt.Println("  --check <hours>           Verify freshness/size; CRITICAL if older than <hours>")
-
-	fmt.Printf("%sFTP OFF‑SITE%s\n", cyan, reset)
+	fmt.Println("  --exclude-ports <csv>     Comma-separated list of Redis ports NOT to back up")
+	fmt.Println("  --check <hours>           Verify freshness and archive integrity; CRITICAL if older than <hours>")
+	fmt.Printf("%sFTP OFF-SITE%s\n", cyan, reset)
 	fmt.Println("  --ftp-conf <file>         Credentials file (default: /etc/ftp-backup.conf)")
 	fmt.Println("  --ftp-host <host>         FTP host (overrides conf)")
 	fmt.Println("  --ftp-user <user>         FTP username")
 	fmt.Println("  --ftp-pass <pass>         FTP password")
 	fmt.Println("  --ftp-keep-factor <n>     Store data on FTP n× longer than locally (default: 4)")
-
 	fmt.Printf("%sEXAMPLES%s\n", cyan, reset)
 	fmt.Printf("  # Basic backup\n  sudo %s\n\n", exe)
 	fmt.Printf("  # Exclude session caches (ports 6380,6381)\n  sudo %s --exclude-ports 6380,6381\n\n", exe)
-	fmt.Printf("  # Nagios check – CRITICAL if older than 25 h\n  %s --check 25\n", exe)
-
-	// Live preview of detected Redis instances and RDB sizes
+	fmt.Printf("  # Nagios check – CRITICAL if older than 25 h\n  %s --check 25\n", exe)
 	fmt.Printf("\n%sDETECTED REDIS TARGETS%s\n", cyan, reset)
 	ports := detectRedisPorts()
 	if len(ports) == 0 {
@@ -200,12 +164,11 @@ func printHelp() {
 		rdbPath := filepath.Join(dir, file)
 		if info, err := os.Stat(rdbPath); err == nil {
 			size := float64(info.Size()) / (1024 * 1024)
-			fmt.Printf("  • port %s → %s  (%.1f MB)\n", port, rdbPath, size)
+			fmt.Printf("  • port %s → %s  (%.1f MB)\n", port, rdbPath, size)
 		}
 	}
 }
 
-/**************** PERMISSION HELPERS *****************/
 func suggestSudo(err error) {
 	if err == nil {
 		return
@@ -215,17 +178,14 @@ func suggestSudo(err error) {
 	}
 }
 
-/******************** LIST ********************/
 func listBackups() {
 	host, _ := os.Hostname()
-	root := filepath.Join(backupPath, host, backupSubdir) // ← добавили backupSubdir
-
+	root := filepath.Join(backupPath, host, backupSubdir)
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		suggestSudo(err)
 		log.Fatalf("%sCannot open %s: %v%s", red, root, err, reset)
 	}
-
 	for _, e := range entries {
 		if e.IsDir() && strings.HasPrefix(e.Name(), "redis_") {
 			daily := filepath.Join(root, e.Name(), "daily")
@@ -238,19 +198,16 @@ func listBackups() {
 	}
 }
 
-/**************** INTERACTIVE RESTORE *********/
 func interactiveRestore() {
 	host, _ := os.Hostname()
-	root := filepath.Join(backupPath, host, backupSubdir) // ← добавили backupSubdir
+	root := filepath.Join(backupPath, host, backupSubdir)
 	reader := bufio.NewReader(os.Stdin)
-
 	dirs, err := os.ReadDir(root)
 	if err != nil {
 		suggestSudo(err)
 		fmt.Printf("%sCannot open %s: %v%s\n", red, root, err, reset)
 		return
 	}
-
 	var ports []string
 	for _, d := range dirs {
 		if d.IsDir() && strings.HasPrefix(d.Name(), "redis_") {
@@ -261,7 +218,6 @@ func interactiveRestore() {
 		fmt.Printf("%sNo backups found.%s\n", red, reset)
 		return
 	}
-
 	fmt.Println("Select Redis port to restore:")
 	for i, p := range ports {
 		fmt.Printf("  [%d] %s\n", i+1, p)
@@ -274,8 +230,7 @@ func interactiveRestore() {
 		return
 	}
 	port := ports[idx-1]
-
-	dailyDir := filepath.Join(root, "redis_"+port, "daily") // ← путь через backupSubdir
+	dailyDir := filepath.Join(root, "redis_"+port, "daily")
 	files, err := os.ReadDir(dailyDir)
 	if err != nil {
 		suggestSudo(err)
@@ -286,7 +241,6 @@ func interactiveRestore() {
 		fmt.Printf("%sNo archives for port %s%s\n", red, port, reset)
 		return
 	}
-
 	fmt.Println("Select archive:")
 	for i, f := range files {
 		fmt.Printf("  [%d] %s\n", i+1, f.Name())
@@ -299,41 +253,33 @@ func interactiveRestore() {
 		return
 	}
 	archive := files[idx-1].Name()
-
-	fmt.Printf("%s⚠  Redis %s will be restored from %s. Continue? (y/N): %s",
-		yellow, port, archive, reset)
+	fmt.Printf("%s⚠  Redis %s will be restored from %s. Continue? (y/N): %s", yellow, port, archive, reset)
 	confirm, _ := reader.ReadString('\n')
 	confirm = strings.ToLower(strings.TrimSpace(confirm))
 	if confirm != "y" && confirm != "yes" {
 		fmt.Println("Cancelled.")
 		return
 	}
-
-	restoreBackup(port, archive) // restoreBackup тоже обновлён, см. ниже
+	restoreBackup(port, archive)
 }
 
-/******************* BACKUP LOOP *******************/
 func runBackup() {
 	now := time.Now()
 	host, _ := os.Hostname()
-
 	ports := detectRedisPorts()
 	if len(ports) == 0 {
 		log.Println("❌ No redis-server processes found.")
 		return
 	}
-
 	for _, port := range ports {
 		if _, skip := excludePorts[port]; skip {
 			log.Printf("%sSkipping Redis %s (excluded)%s", yellow, port, reset)
 			continue
 		}
-
 		if !isRedisHealthy(port) {
 			log.Printf("%sRedis %s is not readable – skipping backup%s", yellow, port, reset)
 			continue
 		}
-
 		dir := getRedisDir(port)
 		file := getRedisRDB(port)
 		if dir == "" || file == "" {
@@ -348,8 +294,6 @@ func runBackup() {
 		}
 		log.Printf("%s✔ Redis %s → %s%s", green, port, rdbPath, reset)
 		archivePath := backupInstance(port, rdbPath, host, now)
-
-		// FTP replication
 		if ftpEnabled && archivePath != "" {
 			remoteRel := strings.TrimPrefix(archivePath, backupPath)
 			remoteRel = strings.TrimPrefix(remoteRel, string(os.PathSeparator))
@@ -359,37 +303,29 @@ func runBackup() {
 	}
 }
 
-/***************** REDIS HELPERS *******************/
-
 func detectRedisPorts() []string {
-	seen := make(map[string]struct{}) // <- новое множество
+	seen := make(map[string]struct{})
 	var ports []string
-
-	conns, err := net.Connections("tcp") // tcp4+tcp6 = дубликаты
+	conns, err := net.Connections("tcp")
 	if err != nil {
 		log.Println("net.Connections error:", err)
 		return nil
 	}
-
 	for _, c := range conns {
 		if c.Status != "LISTEN" || c.Pid == 0 || c.Laddr.Port == 0 {
 			continue
 		}
-
 		proc, _ := process.NewProcess(c.Pid)
 		name, _ := proc.Name()
 		if !strings.Contains(strings.ToLower(name), "redis-server") {
 			continue
 		}
-
-		p := strconv.Itoa(int(c.Laddr.Port))
-		seen[p] = struct{}{} // кладём в set
+		seen[strconv.Itoa(int(c.Laddr.Port))] = struct{}{}
 	}
-
-	for p := range seen { // конвертируем в срез
+	for p := range seen {
 		ports = append(ports, p)
 	}
-	sort.Strings(ports) // (чтобы порядок был стабильным)
+	sort.Strings(ports)
 	return ports
 }
 
@@ -419,16 +355,13 @@ func getRedisRDB(port string) string {
 	return ""
 }
 
-/**************** BACKUP SINGLE INSTANCE ************/
 func backupInstance(port, rdbPath, host string, now time.Time) string {
 	inst := "redis_" + port
-	base := filepath.Join(backupPath, host, backupSubdir, inst) // ← добавили backupSubdir
-
+	base := filepath.Join(backupPath, host, backupSubdir, inst)
 	daily := filepath.Join(base, "daily")
 	weekly := filepath.Join(base, "weekly")
 	monthly := filepath.Join(base, "monthly")
 	yearly := filepath.Join(base, "yearly")
-
 	for _, d := range []string{daily, weekly, monthly, yearly} {
 		if err := os.MkdirAll(d, 0755); err != nil {
 			suggestSudo(err)
@@ -436,10 +369,8 @@ func backupInstance(port, rdbPath, host string, now time.Time) string {
 			return ""
 		}
 	}
-
 	ts := now.Format("2006-01-02_15-04-05")
 	archive := filepath.Join(daily, fmt.Sprintf("%s_%s.tar.gz", ts, inst))
-
 	log.Printf("%s📦 Archiving %s …%s", cyan, archive, reset)
 	if err := createTarGz(archive, []string{rdbPath}); err != nil {
 		suggestSudo(err)
@@ -447,11 +378,9 @@ func backupInstance(port, rdbPath, host string, now time.Time) string {
 		return ""
 	}
 	if err := writeBackupMeta(archive, rdbPath); err != nil {
-		// We still keep the backup, but note that verification may be weaker without metadata.
 		log.Printf("%sFailed to store backup metadata for %s: %v%s", yellow, archive, err, reset)
 	}
 	printFileSize(archive)
-
 	if now.Weekday() == time.Sunday {
 		copyFile(archive, filepath.Join(weekly, filepath.Base(archive)))
 	}
@@ -461,40 +390,30 @@ func backupInstance(port, rdbPath, host string, now time.Time) string {
 	if now.YearDay() == 1 {
 		copyFile(archive, filepath.Join(yearly, filepath.Base(archive)))
 	}
-
 	if maxCopies > 0 {
 		rotateCopies(daily, maxCopies)
 	} else {
 		cleanupOldFiles(daily, keepDays)
 	}
-
 	return archive
 }
 
-/********************** RESTORE ************************/
 func restoreBackup(port, archiveName string) {
 	host, _ := os.Hostname()
 	inst := "redis_" + port
-	archivePath := filepath.Join(backupPath, host, backupSubdir, // ← добавили backupSubdir
-		inst, "daily", archiveName)
-
+	archivePath := filepath.Join(backupPath, host, backupSubdir, inst, "daily", archiveName)
 	if _, err := os.Stat(archivePath); err != nil {
 		suggestSudo(err)
 		log.Fatalf("%sArchive %s not found%s", red, archivePath, reset)
 	}
-
 	restoreDir := getRedisDir(port)
 	fileName := getRedisRDB(port)
 	if restoreDir == "" || fileName == "" {
 		log.Fatalf("%sCannot determine Redis directory for port %s%s", red, port, reset)
 	}
-
 	currentFile := filepath.Join(restoreDir, fileName)
-
-	// --- сохраняем старый RDB (если был) ---
 	var origUID, origGID int
 	var origMode os.FileMode
-
 	if info, err := os.Stat(currentFile); err == nil {
 		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 			origUID = int(stat.Uid)
@@ -508,13 +427,11 @@ func restoreBackup(port, archiveName string) {
 			log.Fatalf("%sCannot rename current file: %v%s", red, err, reset)
 		}
 	}
-
 	log.Printf("%s🔄 Extracting %s → %s%s", cyan, archiveName, restoreDir, reset)
 	if err := extractTarGz(archivePath, restoreDir); err != nil {
 		suggestSudo(err)
 		log.Fatalf("%sRestore error: %v%s", red, err, reset)
 	}
-
 	newFile := filepath.Join(restoreDir, fileName)
 	if origMode != 0 {
 		_ = os.Chmod(newFile, origMode)
@@ -522,31 +439,22 @@ func restoreBackup(port, archiveName string) {
 	if origUID != 0 || origGID != 0 {
 		_ = os.Chown(newFile, origUID, origGID)
 	}
-
 	log.Printf("%s✔ Restore complete%s", green, reset)
 }
 
-/********************** FTP ***************************/
 func initFTP() {
-	// 1) читаем конфиг-файл, если есть
 	if _, err := os.Stat(ftpConfFile); err == nil {
 		_ = parseFTPConf(ftpConfFile)
 	}
-
-	// 2) если заданы флаги host/user/pass – считаем их высшим приоритетом
 	if ftpHost != "" {
 		ftpAccounts = []ftpAccount{{Host: ftpHost, User: ftpUser, Pass: ftpPass}}
 	}
-
 	ftpEnabled = len(ftpAccounts) > 0
 	if !ftpEnabled {
 		return
 	}
-
-	// 3) выводим все таргеты
 	for _, acc := range ftpAccounts {
-		log.Printf("%s🌐 FTP replication target → %s (user %s)%s",
-			cyan, acc.Host, acc.User, reset)
+		log.Printf("%s🌐 FTP replication target → %s (user %s)%s", cyan, acc.Host, acc.User, reset)
 	}
 }
 
@@ -556,7 +464,6 @@ func parseFTPConf(path string) error {
 		return err
 	}
 	defer f.Close()
-
 	var cur ftpAccount
 	commit := func() {
 		if cur.Host != "" && cur.User != "" && cur.Pass != "" {
@@ -564,7 +471,6 @@ func parseFTPConf(path string) error {
 		}
 		cur = ftpAccount{}
 	}
-
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -574,10 +480,8 @@ func parseFTPConf(path string) error {
 		kv := strings.SplitN(line, "=", 2)
 		key := strings.Trim(kv[0], " \"")
 		val := strings.Trim(kv[1], " \"")
-
 		switch key {
 		case "FTP_HOST":
-			// при смене хоста сохраняем предыдущий блок
 			if cur.Host != "" {
 				commit()
 			}
@@ -588,7 +492,7 @@ func parseFTPConf(path string) error {
 			cur.Pass = val
 		}
 	}
-	commit() // последний блок
+	commit()
 	return scanner.Err()
 }
 
@@ -599,13 +503,10 @@ func uploadToSingleFTP(acc ftpAccount, localPath, remoteRel string) {
 		return
 	}
 	defer c.Quit()
-
 	if err := c.Login(acc.User, acc.Pass); err != nil {
 		log.Printf("%sFTP login %s: %v%s", red, acc.Host, err, reset)
 		return
 	}
-
-	// создаём директории
 	parts := strings.Split(filepath.Dir(remoteRel), string(os.PathSeparator))
 	cwd := "/"
 	for _, p := range parts {
@@ -615,22 +516,18 @@ func uploadToSingleFTP(acc ftpAccount, localPath, remoteRel string) {
 		cwd = filepath.Join(cwd, p)
 		_ = c.MakeDir(cwd)
 	}
-
 	f, err := os.Open(localPath)
 	if err != nil {
 		log.Printf("%sFTP open local: %v%s", red, err, reset)
 		return
 	}
 	defer f.Close()
-
 	remotePath := filepath.ToSlash(remoteRel)
 	log.Printf("%s⇪ Uploading to %s: %s%s", cyan, acc.Host, remotePath, reset)
 	if err := c.Stor(remotePath, f); err != nil {
 		log.Printf("%sFTP upload %s: %v%s", red, acc.Host, err, reset)
 		return
 	}
-
-	// ротация
 	if strings.Contains(remotePath, "/daily/") {
 		remoteDailyDir := filepath.ToSlash(filepath.Dir(remotePath))
 		if maxCopies > 0 {
@@ -668,31 +565,23 @@ func cleanupOldFilesFTP(c *ftp.ServerConn, dir string, days int) {
 	}
 }
 
-/********************** CHECK MODE ********************/
 func runCheckMode() {
-	// —--- разбираем конфигурацию FTP, если она есть
 	if _, err := os.Stat(ftpConfFile); err == nil {
 		_ = parseFTPConf(ftpConfFile)
 	}
-
 	if len(ftpAccounts) > 0 {
 		ftpEnabled = true
 	}
-
-	if ftpHost != "" { // могли переопределить флагами
+	if ftpHost != "" {
 		ftpEnabled = true
 	}
 
 	host, _ := os.Hostname()
 	now := time.Now()
-	threshold := now.Add(-time.Duration(checkHours) * time.Hour) // «свежесть» бэкапа
-
+	threshold := now.Add(-time.Duration(checkHours) * time.Hour)
 	problems := []string{}
-	severity := 0 // 0-OK, 1-WARNING, 2-CRITICAL
-
-	/************* ЛОКАЛЬНЫЕ БЭКАПЫ *************/
+	severity := 0
 	totalSize, _ := dirSize(filepath.Join(backupPath, host, backupSubdir))
-
 	var latestSetSize int64
 	var latestFiles int
 
@@ -701,37 +590,28 @@ func runCheckMode() {
 		if _, skip := excludePorts[port]; skip {
 			continue
 		}
-
 		inst := "redis_" + port
 		dailyDir := filepath.Join(backupPath, host, backupSubdir, inst, "daily")
 		latestFile, latestMTime := findLatestArchive(dailyDir)
-
 		if latestFile == "" {
 			problems = append(problems, fmt.Sprintf("Redis %s: NO BACKUP", port))
 			severity = max(severity, 2)
 			continue
 		}
 		if latestMTime.Before(threshold) {
-			problems = append(problems,
-				fmt.Sprintf("Redis %s: older than %d h", port, checkHours))
+			problems = append(problems, fmt.Sprintf("Redis %s: older than %d h", port, checkHours))
 			severity = max(severity, 2)
 		}
-
 		if fi, err := os.Stat(latestFile); err == nil {
 			latestSetSize += fi.Size()
 			latestFiles++
 		}
-
-		// усыхание архива
-		currentRDB := filepath.Join(getRedisDir(port), getRedisRDB(port))
-		if sizeOK, err := compareSizes(currentRDB, latestFile); err == nil && !sizeOK {
-			problems = append(problems,
-				fmt.Sprintf("Redis %s: backup size <75%%", port))
+		if err := validateBackupArchive(latestFile); err != nil {
+			problems = append(problems, fmt.Sprintf("Redis %s: backup integrity check failed: %v", port, err))
 			severity = max(severity, 2)
 		}
 	}
 
-	/************* ДИСК *************/
 	var copiesPossible int64
 	var diskFree, diskTotal int64
 	var usedPct float64
@@ -741,10 +621,8 @@ func runCheckMode() {
 		if errDisk != nil {
 			problems = append(problems, fmt.Sprintf("disk stat: %v", errDisk))
 		}
-
 		copiesPossible = diskFree / latestSetSize
 		usedPct = float64(totalSize) / float64(diskTotal) * 100
-
 		if copiesPossible < 5 || usedPct >= 90 {
 			severity = max(severity, 2)
 			problems = append(problems, "disk pressure CRITICAL")
@@ -754,7 +632,6 @@ func runCheckMode() {
 		}
 	}
 
-	/************* FTP-БЭКАПЫ (если задействован FTP) *************/
 	var ftpLatestSetSize int64
 	var ftpLatestFiles int
 	if ftpEnabled {
@@ -762,7 +639,6 @@ func runCheckMode() {
 		if maxCopies > 0 {
 			expectedFtpCopies = maxCopies * ftpKeepFactor
 		}
-
 		for _, acc := range ftpAccounts {
 			c, err := ftp.Dial(acc.Host+":21", ftp.DialWithTimeout(5*time.Second))
 			if err != nil {
@@ -776,29 +652,21 @@ func runCheckMode() {
 				_ = c.Quit()
 				continue
 			}
-
 			for _, port := range ports {
 				if _, skip := excludePorts[port]; skip {
 					continue
 				}
-				remoteDaily := filepath.ToSlash(filepath.Join("/",
-					host, backupSubdir, "redis_"+port, "daily"))
-
-				// свежий архив
+				remoteDaily := filepath.ToSlash(filepath.Join("/", host, backupSubdir, "redis_"+port, "daily"))
 				latestPath, latestSize, latestTime := findLatestFTPArchive(c, remoteDaily)
 				if latestPath == "" {
-					problems = append(problems,
-						fmt.Sprintf("FTP %s redis %s: NO BACKUP", acc.Host, port))
+					problems = append(problems, fmt.Sprintf("FTP %s redis %s: NO BACKUP", acc.Host, port))
 					severity = max(severity, 2)
 					continue
 				}
 				if latestTime.Before(threshold) {
-					problems = append(problems,
-						fmt.Sprintf("FTP %s redis %s: older than %d h", acc.Host, port, checkHours))
+					problems = append(problems, fmt.Sprintf("FTP %s redis %s: older than %d h", acc.Host, port, checkHours))
 					severity = max(severity, 2)
 				}
-
-				// количество копий
 				if expectedFtpCopies > 0 {
 					entries, _ := c.List(remoteDaily)
 					var cnt int
@@ -808,13 +676,10 @@ func runCheckMode() {
 						}
 					}
 					if cnt < expectedFtpCopies {
-						problems = append(problems,
-							fmt.Sprintf("FTP %s redis %s: only %d/%d copies",
-								acc.Host, port, cnt, expectedFtpCopies))
-						severity = max(severity, 1) // warning
+						problems = append(problems, fmt.Sprintf("FTP %s redis %s: only %d/%d copies", acc.Host, port, cnt, expectedFtpCopies))
+						severity = max(severity, 1)
 					}
 				}
-
 				ftpLatestSetSize += latestSize
 				ftpLatestFiles++
 			}
@@ -822,19 +687,11 @@ func runCheckMode() {
 		}
 	}
 
-	/************* КРАСИВЫЕ СТРОКИ МЕТРИК *************/
-	localMetrics := fmt.Sprintf(
-		"Backups total: %.1f MB (%d files); full set: %.1f MB; free: %.1f MB; can store ≈ %d full sets; used by backups: %.1f%%",
-		humanMB(totalSize), latestFiles, humanMB(latestSetSize),
-		humanMB(diskFree), copiesPossible, usedPct)
-
+	localMetrics := fmt.Sprintf("Backups total: %.1f MB (%d files); full set: %.1f MB; free: %.1f MB; can store ≈ %d full sets; used by backups: %.1f%%", humanMB(totalSize), latestFiles, humanMB(latestSetSize), humanMB(diskFree), copiesPossible, usedPct)
 	ftpMetrics := ""
 	if ftpEnabled && ftpLatestFiles > 0 {
-		ftpMetrics = fmt.Sprintf("FTP latest full set: %.1f MB (%d files)",
-			humanMB(ftpLatestSetSize), ftpLatestFiles)
+		ftpMetrics = fmt.Sprintf("FTP latest full set: %.1f MB (%d files)", humanMB(ftpLatestSetSize), ftpLatestFiles)
 	}
-
-	/************* ВЫВОД ДЛЯ NAGIOS: СТАТУС → ДЕТАЛИ *************/
 	var statusText string
 	switch severity {
 	case 2:
@@ -844,18 +701,15 @@ func runCheckMode() {
 	default:
 		statusText = "OK"
 	}
-
-	details := "all redis backups fresh and sufficiently sized. 👍"
+	details := "all redis backups fresh and valid. 👍"
 	if len(problems) > 0 {
 		details = strings.Join(problems, "; ")
 	}
-
-	fmt.Printf("%s: %s\n", statusText, details) // ← сначала статус
+	fmt.Printf("%s: %s\n", statusText, details)
 	fmt.Println(localMetrics)
 	if ftpMetrics != "" {
 		fmt.Println(ftpMetrics)
 	}
-
 	switch severity {
 	case 2:
 		os.Exit(2)
@@ -866,7 +720,6 @@ func runCheckMode() {
 	}
 }
 
-/***************** FTP helper: свежий архив *****************/
 func findLatestFTPArchive(c *ftp.ServerConn, dir string) (string, int64, time.Time) {
 	entries, err := c.List(dir)
 	if err != nil || len(entries) == 0 {
@@ -907,11 +760,9 @@ func findLatestArchive(dir string) (string, time.Time) {
 			continue
 		}
 		path := filepath.Join(dir, f.Name())
-		if info, err := os.Stat(path); err == nil {
-			if info.ModTime().After(newestTime) {
-				newestTime = info.ModTime()
-				newest = path
-			}
+		if info, err := os.Stat(path); err == nil && info.ModTime().After(newestTime) {
+			newestTime = info.ModTime()
+			newest = path
 		}
 	}
 	return newest, newestTime
@@ -927,14 +778,10 @@ func compareSizes(originalPath, archivePath string) (bool, error) {
 	if err != nil {
 		return true, err
 	}
-
 	referenceSize, err := referenceRDBSize(originalPath, archivePath)
 	if err != nil {
 		return true, err
 	}
-
-	// We demand near parity (95%) with the captured RDB snapshot to avoid false alarms when the
-	// live dataset has grown after the backup was taken.
 	return float64(backupSize) >= 0.95*float64(referenceSize), nil
 }
 
@@ -944,19 +791,16 @@ func archivedPayloadSize(archivePath string) (int64, error) {
 		return 0, err
 	}
 	defer f.Close()
-
 	gr, err := gzip.NewReader(f)
 	if err != nil {
 		return 0, err
 	}
 	defer gr.Close()
-
 	tr := tar.NewReader(gr)
 	hdr, err := tr.Next()
 	if err != nil {
 		return 0, err
 	}
-
 	return hdr.Size, nil
 }
 
@@ -964,12 +808,10 @@ func referenceRDBSize(originalPath, archivePath string) (int64, error) {
 	if meta, err := readBackupMeta(archivePath); err == nil && meta.OriginalSize > 0 {
 		return meta.OriginalSize, nil
 	}
-
 	info, err := os.Stat(originalPath)
 	if err != nil {
 		return 0, err
 	}
-
 	return info.Size(), nil
 }
 
@@ -978,18 +820,11 @@ func writeBackupMeta(archivePath, originalPath string) error {
 	if err != nil {
 		return err
 	}
-
-	meta := backupMeta{
-		OriginalSize: info.Size(),
-		SnapshotTime: info.ModTime().Unix(),
-	}
-
+	meta := backupMeta{OriginalSize: info.Size(), SnapshotTime: info.ModTime().Unix()}
 	data, err := json.Marshal(meta)
 	if err != nil {
 		return err
 	}
-
-	// A sidecar file keeps the snapshot facts so later checks compare like for like.
 	return os.WriteFile(archivePath+".meta", append(data, '\n'), 0644)
 }
 
@@ -998,16 +833,13 @@ func readBackupMeta(archivePath string) (backupMeta, error) {
 	if err != nil {
 		return backupMeta{}, err
 	}
-
 	var meta backupMeta
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return backupMeta{}, err
 	}
-
 	return meta, nil
 }
 
-/********************** FILE OPS **********************/
 func createTarGz(dst string, files []string) error {
 	out, err := os.Create(dst)
 	if err != nil {
@@ -1015,13 +847,10 @@ func createTarGz(dst string, files []string) error {
 		return err
 	}
 	defer out.Close()
-
 	gw := gzip.NewWriter(out)
 	defer gw.Close()
-
 	tw := tar.NewWriter(gw)
 	defer tw.Close()
-
 	for _, file := range files {
 		info, err := os.Stat(file)
 		if err != nil {
@@ -1129,36 +958,28 @@ func acquireLock() {
 	try := func() error {
 		f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 		if err != nil {
-			return err // уже есть файл
+			return err
 		}
 		defer f.Close()
 		_, _ = f.WriteString(strconv.Itoa(os.Getpid()))
-		return nil // лока получена
+		return nil
 	}
-
 	if err := try(); err == nil {
 		return
 	}
-
-	// файл существует – проверяем жив ли владелец
 	data, _ := os.ReadFile(lockFile)
 	if pid, _ := strconv.Atoi(strings.TrimSpace(string(data))); pid > 0 {
-		if proc, _ := os.FindProcess(pid); proc != nil &&
-			proc.Signal(syscall.Signal(0)) == nil {
+		if proc, _ := os.FindProcess(pid); proc != nil && proc.Signal(syscall.Signal(0)) == nil {
 			log.Fatalf("%sBackup already running (PID %d)%s", red, pid, reset)
 		}
 	}
-
-	// владелец умер – удаляем «висящий» лок и пробуем ещё раз
 	_ = os.Remove(lockFile)
 	if err := try(); err != nil {
 		log.Fatalf("%sCannot create lock file: %v%s", red, err, reset)
 	}
 }
 
-func releaseLock() {
-	_ = os.Remove(lockFile)
-}
+func releaseLock() { _ = os.Remove(lockFile) }
 
 func dirSize(root string) (int64, error) {
 	var sum int64
@@ -1176,49 +997,32 @@ func dirSize(root string) (int64, error) {
 
 func humanMB(b int64) float64 { return float64(b) / (1024 * 1024) }
 
-// isRedisHealthy triggers BGSAVE and waits until it finishes.
-// Returns true if Redis answers PING and creates a fresh RDB
-// within --save-timeout seconds.
 func isRedisHealthy(port string) bool {
-	// 1) простой PING
 	out, err := exec.Command("redis-cli", "-p", port, "--raw", "PING").Output()
 	if err != nil || strings.TrimSpace(string(out)) != "PONG" {
 		return false
 	}
-
-	// 2) время последнего успешного сохранения
 	beforeStr, err := exec.Command("redis-cli", "-p", port, "--raw", "LASTSAVE").Output()
 	if err != nil {
 		return false
 	}
 	before, _ := strconv.ParseInt(strings.TrimSpace(string(beforeStr)), 10, 64)
-
-	// 3) запускаем BGSAVE (игнорируем «save in progress»-ошибку)
 	_, _ = exec.Command("redis-cli", "-p", port, "BGSAVE").Output()
-
-	// 4) ждём, пока LASTSAVE станет новее
 	deadline := time.Now().Add(time.Duration(saveTimeoutSec) * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(2 * time.Second)
-		if time.Now().Add(-30 * time.Second).After(deadline) {
-			log.Printf("%s⌛ Redis %s: still waiting for BGSAVE …%s", yellow, port, reset)
-		}
-
 		afterStr, err := exec.Command("redis-cli", "-p", port, "--raw", "LASTSAVE").Output()
 		if err != nil {
 			return false
 		}
 		after, _ := strconv.ParseInt(strings.TrimSpace(string(afterStr)), 10, 64)
-
 		if after > before {
-			return true // дамп готов
+			return true
 		}
 	}
-	// таймаут: дамп не появился
 	return false
 }
 
-// rotateCopies keeps only <copies> newest *.tar.gz in dir.
 func rotateCopies(dir string, copies int) {
 	files, _ := filepath.Glob(filepath.Join(dir, "*.tar.gz"))
 	if len(files) <= copies {
@@ -1235,14 +1039,11 @@ func rotateCopies(dir string, copies int) {
 	}
 }
 
-// rotateCopiesFTP keeps only <copies> newest *.tar.gz in an FTP directory.
 func rotateCopiesFTP(c *ftp.ServerConn, dir string, copies int) {
 	entries, err := c.List(dir)
 	if err != nil {
 		return
 	}
-
-	// работаем с указателями
 	var files []*ftp.Entry
 	for _, e := range entries {
 		if e.Type == ftp.EntryTypeFile && strings.HasSuffix(e.Name, ".tar.gz") {
@@ -1250,15 +1051,9 @@ func rotateCopiesFTP(c *ftp.ServerConn, dir string, copies int) {
 		}
 	}
 	if len(files) <= copies {
-		return // ничего удалять
+		return
 	}
-
-	// сортируем по времени: новые → старые
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Time.After(files[j].Time)
-	})
-
-	// удаляем «лишние» файлы
+	sort.Slice(files, func(i, j int) bool { return files[i].Time.After(files[j].Time) })
 	for _, e := range files[copies:] {
 		remoteFile := filepath.ToSlash(filepath.Join(dir, e.Name))
 		log.Printf("🧹 (FTP) Deleting extra archive %s", remoteFile)
