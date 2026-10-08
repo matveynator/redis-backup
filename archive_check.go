@@ -5,17 +5,27 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"fmt"
+	"hash/crc64"
 	"io"
 	"os"
+	"strconv"
 )
 
-const redisRDBHeaderSize = 9
+const (
+	redisRDBHeaderSize = 9
+	redisRDBEOF        = 0xff
+	redisCRC64Poly     = uint64(0x95ac9329ac4bc9b5)
+)
 
-// validateBackupArchive verifies the latest backup itself instead of comparing
-// it with the current live dump.rdb, whose size may legitimately change after
-// the backup was created.
+var redisCRC64Table = crc64.MakeTable(redisCRC64Poly)
+
+// validateBackupArchive verifies the archive container and the Redis RDB
+// payload itself. It deliberately does not compare against the current live
+// dump.rdb, whose size may legitimately change after the backup was created.
 func validateBackupArchive(archivePath string) error {
 	f, err := os.Open(archivePath)
 	if err != nil {
@@ -31,7 +41,6 @@ func validateBackupArchive(archivePath string) error {
 
 	tr := tar.NewReader(gr)
 	rdbFiles := 0
-
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -49,13 +58,13 @@ func validateBackupArchive(archivePath string) error {
 		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
 			return fmt.Errorf("read %s: %w", hdr.Name, readErr)
 		}
-
 		if n == redisRDBHeaderSize && isRedisRDBHeader(header) {
 			rdbFiles++
+			if err := validateRedisRDB(io.MultiReader(bytes.NewReader(header), tr)); err != nil {
+				return fmt.Errorf("%s: %w", hdr.Name, err)
+			}
+			continue
 		}
-
-		// Consume the complete tar entry. This forces gzip/tar to detect a
-		// truncated payload instead of validating only the tar header.
 		if _, err := io.Copy(io.Discard, tr); err != nil {
 			return fmt.Errorf("read %s: %w", hdr.Name, err)
 		}
@@ -65,15 +74,125 @@ func validateBackupArchive(archivePath string) error {
 	if _, err := io.Copy(io.Discard, gr); err != nil {
 		return fmt.Errorf("gzip checksum: %w", err)
 	}
-
 	if rdbFiles == 0 {
 		return fmt.Errorf("archive does not contain a Redis RDB file")
 	}
 	if rdbFiles > 1 {
 		return fmt.Errorf("archive contains %d Redis RDB files", rdbFiles)
 	}
-
 	return nil
+}
+
+// validateRedisRDB checks the RDB EOF/footer and, for RDB v5+, the CRC64
+// written by Redis. The checksum covers the complete RDB through the 0xff EOF
+// opcode and excludes only the final eight checksum bytes.
+func validateRedisRDB(r io.Reader) error {
+	header := make([]byte, redisRDBHeaderSize)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return fmt.Errorf("RDB header: %w", err)
+	}
+	version, ok := redisRDBVersion(header)
+	if !ok {
+		return fmt.Errorf("invalid Redis RDB header")
+	}
+	if version < 5 {
+		return validateLegacyRedisRDB(r)
+	}
+
+	crc := redisCRC64Update(0, header)
+	var tail [8]byte
+	tailLen := 0
+	var dataBytes int64
+	var lastData byte
+	buf := make([]byte, 32*1024)
+
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			p := buf[:n]
+			total := tailLen + len(p)
+			if total <= len(tail) {
+				copy(tail[tailLen:], p)
+				tailLen = total
+			} else {
+				// Keep the final eight bytes pending because they are the stored
+				// checksum. Feed everything before them into Redis CRC64.
+				process := total - len(tail)
+				fromTail := process
+				if fromTail > tailLen {
+					fromTail = tailLen
+				}
+				if fromTail > 0 {
+					crc = redisCRC64Update(crc, tail[:fromTail])
+					lastData = tail[fromTail-1]
+					dataBytes += int64(fromTail)
+					copy(tail[:], tail[fromTail:tailLen])
+					tailLen -= fromTail
+					process -= fromTail
+				}
+				if process > 0 {
+					crc = redisCRC64Update(crc, p[:process])
+					lastData = p[process-1]
+					dataBytes += int64(process)
+					p = p[process:]
+				}
+				copy(tail[tailLen:], p)
+				tailLen += len(p)
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("RDB body: %w", err)
+		}
+	}
+
+	if tailLen != len(tail) {
+		return fmt.Errorf("RDB checksum footer truncated")
+	}
+	if dataBytes == 0 || lastData != redisRDBEOF {
+		return fmt.Errorf("RDB EOF opcode missing")
+	}
+
+	stored := binary.LittleEndian.Uint64(tail[:])
+	// Redis writes zero when rdbchecksum is disabled; EOF validation still
+	// catches a truncated dump in that configuration.
+	if stored != 0 && stored != crc {
+		return fmt.Errorf("RDB checksum mismatch: stored %016x, calculated %016x", stored, crc)
+	}
+	return nil
+}
+
+func validateLegacyRedisRDB(r io.Reader) error {
+	var last byte
+	var count int64
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			last = buf[n-1]
+			count += int64(n)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("RDB body: %w", err)
+		}
+	}
+	if count == 0 || last != redisRDBEOF {
+		return fmt.Errorf("RDB EOF opcode missing")
+	}
+	return nil
+}
+
+func redisRDBVersion(header []byte) (int, bool) {
+	if !isRedisRDBHeader(header) {
+		return 0, false
+	}
+	v, err := strconv.Atoi(string(header[5:]))
+	return v, err == nil
 }
 
 func isRedisRDBHeader(header []byte) bool {
@@ -86,4 +205,10 @@ func isRedisRDBHeader(header []byte) bool {
 		}
 	}
 	return true
+}
+
+// Go's hash/crc64 API complements the CRC before and after Update. Redis does
+// not, so complementing on both sides gives the exact incremental Redis CRC64.
+func redisCRC64Update(crc uint64, data []byte) uint64 {
+	return ^crc64.Update(^crc, redisCRC64Table, data)
 }
