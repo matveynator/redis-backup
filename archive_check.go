@@ -23,10 +23,60 @@ const (
 
 var redisCRC64Table = crc64.MakeTable(redisCRC64Poly)
 
-// validateBackupArchive verifies the archive container and the Redis RDB
-// payload itself. It deliberately does not compare against the current live
-// dump.rdb, whose size may legitimately change after the backup was created.
+// validateBackupArchive is the lightweight check used by --check/Nagios.
+// It intentionally reads only the gzip/tar headers and the first RDB bytes;
+// it must not stream/decompress a multi-GB backup on every monitoring run.
+//
+// When snapshot metadata is available, the archived RDB size is compared with
+// the size captured for that backup. This retains the useful size sanity check
+// without comparing with a live dump.rdb that may have grown since backup.
 func validateBackupArchive(archivePath string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("gzip: %w", err)
+	}
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	hdr, err := tr.Next()
+	if err != nil {
+		return fmt.Errorf("tar: %w", err)
+	}
+	if !hdr.FileInfo().Mode().IsRegular() {
+		return fmt.Errorf("archive does not start with a regular RDB file")
+	}
+	if hdr.Size < redisRDBHeaderSize {
+		return fmt.Errorf("RDB payload too small: %d bytes", hdr.Size)
+	}
+
+	header := make([]byte, redisRDBHeaderSize)
+	if _, err := io.ReadFull(tr, header); err != nil {
+		return fmt.Errorf("RDB header: %w", err)
+	}
+	if !isRedisRDBHeader(header) {
+		return fmt.Errorf("invalid Redis RDB header")
+	}
+
+	if meta, err := readBackupMeta(archivePath); err == nil && meta.OriginalSize > 0 {
+		// Keep the historical tolerance to avoid false alerts if the source RDB
+		// changed slightly between archive creation and metadata capture.
+		if float64(hdr.Size) < 0.95*float64(meta.OriginalSize) {
+			return fmt.Errorf("RDB payload size %d is below 95%% of snapshot size %d", hdr.Size, meta.OriginalSize)
+		}
+	}
+	return nil
+}
+
+// validateBackupArchiveDeep performs a full streaming validation of gzip/tar
+// plus the Redis RDB EOF/checksum. It is deliberately separate from the normal
+// monitoring path because validating a large compressed RDB is CPU intensive.
+func validateBackupArchiveDeep(archivePath string) error {
 	f, err := os.Open(archivePath)
 	if err != nil {
 		return err
@@ -70,7 +120,6 @@ func validateBackupArchive(archivePath string) error {
 		}
 	}
 
-	// Read through the gzip trailer so its checksum is verified too.
 	if _, err := io.Copy(io.Discard, gr); err != nil {
 		return fmt.Errorf("gzip checksum: %w", err)
 	}
@@ -115,8 +164,6 @@ func validateRedisRDB(r io.Reader) error {
 				copy(tail[tailLen:], p)
 				tailLen = total
 			} else {
-				// Keep the final eight bytes pending because they are the stored
-				// checksum. Feed everything before them into Redis CRC64.
 				process := total - len(tail)
 				fromTail := process
 				if fromTail > tailLen {
@@ -156,8 +203,6 @@ func validateRedisRDB(r io.Reader) error {
 	}
 
 	stored := binary.LittleEndian.Uint64(tail[:])
-	// Redis writes zero when rdbchecksum is disabled; EOF validation still
-	// catches a truncated dump in that configuration.
 	if stored != 0 && stored != crc {
 		return fmt.Errorf("RDB checksum mismatch: stored %016x, calculated %016x", stored, crc)
 	}
@@ -207,8 +252,6 @@ func isRedisRDBHeader(header []byte) bool {
 	return true
 }
 
-// Go's hash/crc64 API complements the CRC before and after Update. Redis does
-// not, so complementing on both sides gives the exact incremental Redis CRC64.
 func redisCRC64Update(crc uint64, data []byte) uint64 {
 	return ^crc64.Update(^crc, redisCRC64Table, data)
 }
