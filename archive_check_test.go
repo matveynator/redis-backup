@@ -7,6 +7,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,6 +40,14 @@ func writeTestArchive(t *testing.T, payload []byte) string {
 	return path
 }
 
+func writeTestMeta(t *testing.T, archive string, originalSize int64) {
+	t.Helper()
+	data := []byte(fmt.Sprintf("{\"original_size\":%d,\"snapshot_time\":1}\n", originalSize))
+	if err := os.WriteFile(archive+".meta", data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func makeTestRDB(body []byte, checksum bool) []byte {
 	data := append([]byte("REDIS0011"), body...)
 	data = append(data, redisRDBEOF)
@@ -49,28 +58,39 @@ func makeTestRDB(body []byte, checksum bool) []byte {
 	return append(data, footer[:]...)
 }
 
-func TestValidateBackupArchiveValid(t *testing.T) {
-	path := writeTestArchive(t, makeTestRDB(nil, true))
+func TestValidateBackupArchiveFastValid(t *testing.T) {
+	payload := makeTestRDB(nil, true)
+	path := writeTestArchive(t, payload)
+	writeTestMeta(t, path, int64(len(payload)))
 	if err := validateBackupArchive(path); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestValidateBackupArchiveValidChecksumDisabled(t *testing.T) {
-	path := writeTestArchive(t, makeTestRDB(nil, false))
-	if err := validateBackupArchive(path); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestValidateBackupArchiveRejectsNonRedisPayload(t *testing.T) {
+func TestValidateBackupArchiveFastRejectsNonRedisPayload(t *testing.T) {
 	path := writeTestArchive(t, []byte("not a redis database"))
 	if err := validateBackupArchive(path); err == nil {
 		t.Fatal("expected validation error")
 	}
 }
 
-func TestValidateBackupArchiveRejectsTruncatedArchive(t *testing.T) {
+func TestValidateBackupArchiveFastRejectsUndersizedSnapshot(t *testing.T) {
+	payload := makeTestRDB(nil, true)
+	path := writeTestArchive(t, payload)
+	writeTestMeta(t, path, int64(len(payload))*2)
+	if err := validateBackupArchive(path); err == nil {
+		t.Fatal("expected snapshot size error")
+	}
+}
+
+func TestValidateBackupArchiveDeepValidChecksumDisabled(t *testing.T) {
+	path := writeTestArchive(t, makeTestRDB(nil, false))
+	if err := validateBackupArchiveDeep(path); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateBackupArchiveDeepRejectsTruncatedArchive(t *testing.T) {
 	path := writeTestArchive(t, makeTestRDB([]byte{1, 2, 3, 4, 5}, true))
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -82,35 +102,35 @@ func TestValidateBackupArchiveRejectsTruncatedArchive(t *testing.T) {
 	if err := os.WriteFile(path, data[:len(data)-8], 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateBackupArchive(path); err == nil {
+	if err := validateBackupArchiveDeep(path); err == nil {
 		t.Fatal("expected validation error")
 	}
 }
 
-func TestValidateBackupArchiveRejectsRecompressedPartialRDB(t *testing.T) {
+func TestValidateBackupArchiveDeepRejectsRecompressedPartialRDB(t *testing.T) {
 	full := makeTestRDB([]byte{1, 2, 3, 4, 5}, true)
 	partial := append([]byte(nil), full[:len(full)-10]...)
 	path := writeTestArchive(t, partial)
-	if err := validateBackupArchive(path); err == nil {
+	if err := validateBackupArchiveDeep(path); err == nil {
 		t.Fatal("expected validation error")
 	}
 }
 
-func TestValidateBackupArchiveRejectsBodyCorruption(t *testing.T) {
+func TestValidateBackupArchiveDeepRejectsBodyCorruption(t *testing.T) {
 	payload := makeTestRDB([]byte{1, 2, 3, 4, 5}, true)
 	payload[10] ^= 0xff
 	path := writeTestArchive(t, payload)
-	if err := validateBackupArchive(path); err == nil {
+	if err := validateBackupArchiveDeep(path); err == nil {
 		t.Fatal("expected checksum error")
 	}
 }
 
-func TestValidateBackupArchiveRejectsMissingEOF(t *testing.T) {
+func TestValidateBackupArchiveDeepRejectsMissingEOF(t *testing.T) {
 	payload := makeTestRDB(nil, true)
 	payload[len(payload)-9] = 0x00
 	binary.LittleEndian.PutUint64(payload[len(payload)-8:], redisCRC64Update(0, payload[:len(payload)-8]))
 	path := writeTestArchive(t, payload)
-	if err := validateBackupArchive(path); err == nil {
+	if err := validateBackupArchiveDeep(path); err == nil {
 		t.Fatal("expected EOF error")
 	}
 }
