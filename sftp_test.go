@@ -48,6 +48,59 @@ SFTP_ROOT=backup-b
 	}
 }
 
+func TestSFTPHostOverridesConfiguredTargets(t *testing.T) {
+	oldAccounts := sftpAccounts
+	oldEnabled := sftpEnabled
+	oldConf := sftpConfFile
+	oldHost := sftpHost
+	oldPort := sftpPort
+	oldUser := sftpUser
+	oldKey := sftpKeyFile
+	oldKnownHosts := sftpKnownHosts
+	oldRoot := sftpRoot
+	defer func() {
+		sftpAccounts = oldAccounts
+		sftpEnabled = oldEnabled
+		sftpConfFile = oldConf
+		sftpHost = oldHost
+		sftpPort = oldPort
+		sftpUser = oldUser
+		sftpKeyFile = oldKey
+		sftpKnownHosts = oldKnownHosts
+		sftpRoot = oldRoot
+	}()
+
+	file := filepath.Join(t.TempDir(), "sftp.conf")
+	content := `
+SFTP_HOST=old1.example.com
+SFTP_USER=old1
+
+SFTP_HOST=old2.example.com
+SFTP_USER=old2
+`
+	if err := os.WriteFile(file, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	sftpConfFile = file
+	sftpHost = "override.example.com"
+	sftpPort = 2222
+	sftpUser = "override"
+	sftpKeyFile = "/root/.ssh/override"
+	sftpKnownHosts = "/root/.ssh/known_hosts"
+	sftpRoot = "/override-root"
+
+	initSFTP()
+
+	if len(sftpAccounts) != 1 {
+		t.Fatalf("got %d accounts, want exactly 1 CLI override account: %+v", len(sftpAccounts), sftpAccounts)
+	}
+	got := sftpAccounts[0]
+	if got.Host != "override.example.com" || got.Port != 2222 || got.User != "override" || got.KeyFile != "/root/.ssh/override" || got.KnownHosts != "/root/.ssh/known_hosts" || got.Root != "/override-root" {
+		t.Fatalf("unexpected override account: %+v", got)
+	}
+}
+
 func TestRemoteSFTPPath(t *testing.T) {
 	acc := sftpAccount{Root: "/remote/root"}
 	got := remoteSFTPPath(acc, "server-a/redis-backup/redis_6379/daily/a.tar.gz")
