@@ -60,7 +60,9 @@ func init() {
 
 func initSFTP() {
 	sftpAccounts = nil
-	if sftpConfFile != "" {
+	// Match the existing FTP override semantics: an explicit --sftp-host
+	// replaces every target from the config file instead of adding to them.
+	if sftpHost == "" && sftpConfFile != "" {
 		if _, err := os.Stat(sftpConfFile); err == nil {
 			if err := parseSFTPConf(sftpConfFile); err != nil {
 				log.Printf("%sSFTP config %s: %v%s", yellow, sftpConfFile, err, reset)
