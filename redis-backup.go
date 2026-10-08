@@ -120,6 +120,7 @@ func main() {
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		go func() { <-sig; releaseLock(); os.Exit(1) }()
 		initFTP()
+		initSFTP()
 		runBackup()
 	}
 }
@@ -145,6 +146,15 @@ func printHelp() {
 	fmt.Println("  --ftp-user <user>         FTP username")
 	fmt.Println("  --ftp-pass <pass>         FTP password")
 	fmt.Println("  --ftp-keep-factor <n>     Store data on FTP n× longer than locally (default: 4)")
+	fmt.Printf("%sSFTP OFF-SITE%s\n", cyan, reset)
+	fmt.Println("  --sftp-conf <file>        Configuration file (default: /etc/sftp-backup.conf)")
+	fmt.Println("  --sftp-host <host>        SFTP host")
+	fmt.Println("  --sftp-port <port>        SFTP port (default: 22)")
+	fmt.Println("  --sftp-user <user>        SFTP username")
+	fmt.Println("  --sftp-key <file>         Private key; OpenSSH defaults/agent are used when empty")
+	fmt.Println("  --sftp-known-hosts <file> known_hosts override")
+	fmt.Println("  --sftp-root <dir>         Remote backup root (default: /)")
+	fmt.Println("  --sftp-keep-factor <n>    Store data on SFTP n× longer than locally (default: 4)")
 	fmt.Printf("%sEXAMPLES%s\n", cyan, reset)
 	fmt.Printf("  # Basic backup\n  sudo %s\n\n", exe)
 	fmt.Printf("  # Exclude session caches (ports 6380,6381)\n  sudo %s --exclude-ports 6380,6381\n\n", exe)
@@ -294,10 +304,15 @@ func runBackup() {
 		}
 		log.Printf("%s✔ Redis %s → %s%s", green, port, rdbPath, reset)
 		archivePath := backupInstance(port, rdbPath, host, now)
-		if ftpEnabled && archivePath != "" {
+		if archivePath != "" && (ftpEnabled || sftpEnabled) {
 			remoteRel := strings.TrimPrefix(archivePath, backupPath)
 			remoteRel = strings.TrimPrefix(remoteRel, string(os.PathSeparator))
-			uploadToFTP(archivePath, remoteRel)
+			if ftpEnabled {
+				uploadToFTP(archivePath, remoteRel)
+			}
+			if sftpEnabled {
+				uploadToSFTP(archivePath, remoteRel)
+			}
 		}
 		log.Printf("%s----------------------------------------%s", cyan, reset)
 	}
@@ -575,6 +590,7 @@ func runCheckMode() {
 	if ftpHost != "" {
 		ftpEnabled = true
 	}
+	initSFTP()
 
 	host, _ := os.Hostname()
 	now := time.Now()
@@ -687,10 +703,20 @@ func runCheckMode() {
 		}
 	}
 
+	sftpResult := checkSFTPBackups(host, ports, threshold)
+	if len(sftpResult.Problems) > 0 {
+		problems = append(problems, sftpResult.Problems...)
+	}
+	severity = max(severity, sftpResult.Severity)
+
 	localMetrics := fmt.Sprintf("Backups total: %.1f MB (%d files); full set: %.1f MB; free: %.1f MB; can store ≈ %d full sets; used by backups: %.1f%%", humanMB(totalSize), latestFiles, humanMB(latestSetSize), humanMB(diskFree), copiesPossible, usedPct)
 	ftpMetrics := ""
 	if ftpEnabled && ftpLatestFiles > 0 {
 		ftpMetrics = fmt.Sprintf("FTP latest full set: %.1f MB (%d files)", humanMB(ftpLatestSetSize), ftpLatestFiles)
+	}
+	sftpMetrics := ""
+	if sftpEnabled && sftpResult.LatestFiles > 0 {
+		sftpMetrics = fmt.Sprintf("SFTP latest full set: %d files", sftpResult.LatestFiles)
 	}
 	var statusText string
 	switch severity {
@@ -709,6 +735,9 @@ func runCheckMode() {
 	fmt.Println(localMetrics)
 	if ftpMetrics != "" {
 		fmt.Println(ftpMetrics)
+	}
+	if sftpMetrics != "" {
+		fmt.Println(sftpMetrics)
 	}
 	switch severity {
 	case 2:
