@@ -5,8 +5,8 @@ package main
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,8 +39,25 @@ func writeTestArchive(t *testing.T, payload []byte) string {
 	return path
 }
 
+func makeTestRDB(body []byte, checksum bool) []byte {
+	data := append([]byte("REDIS0011"), body...)
+	data = append(data, redisRDBEOF)
+	var footer [8]byte
+	if checksum {
+		binary.LittleEndian.PutUint64(footer[:], redisCRC64Update(0, data))
+	}
+	return append(data, footer[:]...)
+}
+
 func TestValidateBackupArchiveValid(t *testing.T) {
-	path := writeTestArchive(t, append([]byte("REDIS0011"), bytes.Repeat([]byte{0x42}, 1024)...))
+	path := writeTestArchive(t, makeTestRDB(nil, true))
+	if err := validateBackupArchive(path); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateBackupArchiveValidChecksumDisabled(t *testing.T) {
+	path := writeTestArchive(t, makeTestRDB(nil, false))
 	if err := validateBackupArchive(path); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -54,7 +71,7 @@ func TestValidateBackupArchiveRejectsNonRedisPayload(t *testing.T) {
 }
 
 func TestValidateBackupArchiveRejectsTruncatedArchive(t *testing.T) {
-	path := writeTestArchive(t, append([]byte("REDIS0011"), bytes.Repeat([]byte{0x42}, 8192)...))
+	path := writeTestArchive(t, makeTestRDB([]byte{1, 2, 3, 4, 5}, true))
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -67,6 +84,46 @@ func TestValidateBackupArchiveRejectsTruncatedArchive(t *testing.T) {
 	}
 	if err := validateBackupArchive(path); err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateBackupArchiveRejectsRecompressedPartialRDB(t *testing.T) {
+	full := makeTestRDB([]byte{1, 2, 3, 4, 5}, true)
+	partial := append([]byte(nil), full[:len(full)-10]...)
+	path := writeTestArchive(t, partial)
+	if err := validateBackupArchive(path); err == nil {
+		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateBackupArchiveRejectsBodyCorruption(t *testing.T) {
+	payload := makeTestRDB([]byte{1, 2, 3, 4, 5}, true)
+	payload[10] ^= 0xff
+	path := writeTestArchive(t, payload)
+	if err := validateBackupArchive(path); err == nil {
+		t.Fatal("expected checksum error")
+	}
+}
+
+func TestValidateBackupArchiveRejectsMissingEOF(t *testing.T) {
+	payload := makeTestRDB(nil, true)
+	payload[len(payload)-9] = 0x00
+	binary.LittleEndian.PutUint64(payload[len(payload)-8:], redisCRC64Update(0, payload[:len(payload)-8]))
+	path := writeTestArchive(t, payload)
+	if err := validateBackupArchive(path); err == nil {
+		t.Fatal("expected EOF error")
+	}
+}
+
+func TestRedisCRC64KnownVector(t *testing.T) {
+	const want uint64 = 0xe9c6d914c4b8d9ca
+	if got := redisCRC64Update(0, []byte("123456789")); got != want {
+		t.Fatalf("crc = %016x, want %016x", got, want)
+	}
+	got := redisCRC64Update(0, []byte("1234"))
+	got = redisCRC64Update(got, []byte("56789"))
+	if got != want {
+		t.Fatalf("incremental crc = %016x, want %016x", got, want)
 	}
 }
 
