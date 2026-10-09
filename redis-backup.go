@@ -393,6 +393,7 @@ func backupInstance(port, rdbPath, host string, now time.Time) string {
 	printFileSize(archive)
 	if maxCopies > 0 {
 		rotateCopies(daily, maxCopies)
+		cleanupLongTermCopies(base)
 		return archive
 	}
 
@@ -985,6 +986,20 @@ func cleanupOldFiles(dir string, days int) {
 		if info, err := os.Stat(f); err == nil && info.ModTime().Before(cutoff) {
 			log.Printf("🧹 Deleting old archive %s", filepath.Base(f))
 			_ = os.Remove(f)
+			_ = os.Remove(f + ".meta")
+		}
+	}
+}
+
+func cleanupLongTermCopies(base string) {
+	for _, name := range []string{"weekly", "monthly", "yearly"} {
+		dir := filepath.Join(base, name)
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			continue
+		}
+		log.Printf("🧹 Removing legacy %s snapshots in strict --copies mode", name)
+		if err := os.RemoveAll(dir); err != nil {
+			log.Printf("%sCannot remove %s: %v%s", yellow, dir, err, reset)
 		}
 	}
 }
@@ -1071,6 +1086,7 @@ func rotateCopies(dir string, copies int) {
 	for _, f := range files[copies:] {
 		log.Printf("🧹 Deleting extra archive %s", filepath.Base(f))
 		_ = os.Remove(f)
+		_ = os.Remove(f + ".meta")
 	}
 }
 
