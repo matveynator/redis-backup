@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -111,6 +112,98 @@ func TestWritableSFTPRootCandidatesExplicit(t *testing.T) {
 	want := []string{"/data"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("candidates = %#v, want %#v", got, want)
+	}
+}
+
+func TestExplicitSFTPRootCreatedBeforeProbe(t *testing.T) {
+	oldProbe := sftpProbeBatch
+	defer func() { sftpProbeBatch = oldProbe }()
+
+	var commands string
+	sftpProbeBatch = func(_ sftpAccount, batch string) (string, error) {
+		commands = batch
+		return "", nil
+	}
+
+	root, err := resolveWritableSFTPRoot(sftpAccount{Root: "/data/backups"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root != "/data/backups" {
+		t.Fatalf("root = %q, want /data/backups", root)
+	}
+	for _, want := range []string{
+		`-mkdir "/data"`,
+		`-mkdir "/data/backups"`,
+		`mkdir "/data/backups/.redis-backup-write-test-`,
+	} {
+		if !strings.Contains(commands, want) {
+			t.Fatalf("probe commands %q do not contain %q", commands, want)
+		}
+	}
+}
+
+func TestTerminalSFTPProbeErrorStopsAutoCandidates(t *testing.T) {
+	oldProbe := sftpProbeBatch
+	defer func() { sftpProbeBatch = oldProbe }()
+
+	calls := 0
+	sftpProbeBatch = func(_ sftpAccount, _ string) (string, error) {
+		calls++
+		return "", errors.New("ssh: Could not resolve hostname backup.invalid: Name or service not known")
+	}
+
+	_, err := resolveWritableSFTPRoot(sftpAccount{Root: "auto", Host: "backup.invalid", User: "backup08"})
+	if err == nil {
+		t.Fatal("expected probe failure")
+	}
+	if calls != 1 {
+		t.Fatalf("probe calls = %d, want 1 after terminal connection failure", calls)
+	}
+}
+
+func TestDirectoryPermissionFailureTriesNextAutoCandidate(t *testing.T) {
+	oldProbe := sftpProbeBatch
+	defer func() { sftpProbeBatch = oldProbe }()
+
+	calls := 0
+	sftpProbeBatch = func(_ sftpAccount, _ string) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("remote mkdir \".redis-backup-write-test\": Permission denied")
+		}
+		return "", nil
+	}
+
+	root, err := resolveWritableSFTPRoot(sftpAccount{Root: "auto", User: "backup08"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root != "/data" {
+		t.Fatalf("root = %q, want /data", root)
+	}
+	if calls != 2 {
+		t.Fatalf("probe calls = %d, want 2", calls)
+	}
+}
+
+func TestTerminalSFTPProbeClassification(t *testing.T) {
+	terminal := []string{
+		"Could not resolve hostname backup.invalid: Name or service not known",
+		"connect to host example port 22: Connection refused",
+		"ssh: connect to host example port 22: Connection timed out",
+		"backup@example: Permission denied (publickey).",
+		"Host key verification failed.",
+		"REMOTE HOST IDENTIFICATION HAS CHANGED!",
+		"Couldn't read packet: Connection reset by peer",
+	}
+	for _, msg := range terminal {
+		if !isTerminalSFTPProbeError(errors.New(msg)) {
+			t.Errorf("expected terminal classification for %q", msg)
+		}
+	}
+	if isTerminalSFTPProbeError(errors.New(`remote mkdir "/data": Permission denied`)) {
+		t.Fatal("directory permission error must remain path-level, not terminal")
 	}
 }
 
