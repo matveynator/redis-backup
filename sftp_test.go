@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,7 +35,7 @@ type fakeSFTPFS struct {
 func (f *fakeSFTPFS) Mkdir(name string) error {
 	f.mkdirCalls = append(f.mkdirCalls, name)
 	for prefix, err := range f.mkdirErr {
-		if name == prefix || len(name) > len(prefix) && name[:len(prefix)+1] == prefix+"/" {
+		if strings.HasPrefix(name, prefix) {
 			return err
 		}
 	}
