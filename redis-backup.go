@@ -374,15 +374,10 @@ func backupInstance(port, rdbPath, host string, now time.Time) string {
 	inst := "redis_" + port
 	base := filepath.Join(backupPath, host, backupSubdir, inst)
 	daily := filepath.Join(base, "daily")
-	weekly := filepath.Join(base, "weekly")
-	monthly := filepath.Join(base, "monthly")
-	yearly := filepath.Join(base, "yearly")
-	for _, d := range []string{daily, weekly, monthly, yearly} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			suggestSudo(err)
-			log.Printf("mkdir %s: %v", d, err)
-			return ""
-		}
+	if err := os.MkdirAll(daily, 0755); err != nil {
+		suggestSudo(err)
+		log.Printf("mkdir %s: %v", daily, err)
+		return ""
 	}
 	ts := now.Format("2006-01-02_15-04-05")
 	archive := filepath.Join(daily, fmt.Sprintf("%s_%s.tar.gz", ts, inst))
@@ -396,6 +391,22 @@ func backupInstance(port, rdbPath, host string, now time.Time) string {
 		log.Printf("%sFailed to store backup metadata for %s: %v%s", yellow, archive, err, reset)
 	}
 	printFileSize(archive)
+	if maxCopies > 0 {
+		rotateCopies(daily, maxCopies)
+		cleanupLongTermCopies(base)
+		return archive
+	}
+
+	weekly := filepath.Join(base, "weekly")
+	monthly := filepath.Join(base, "monthly")
+	yearly := filepath.Join(base, "yearly")
+	for _, d := range []string{weekly, monthly, yearly} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			suggestSudo(err)
+			log.Printf("mkdir %s: %v", d, err)
+			return archive
+		}
+	}
 	if now.Weekday() == time.Sunday {
 		copyFile(archive, filepath.Join(weekly, filepath.Base(archive)))
 	}
@@ -405,11 +416,7 @@ func backupInstance(port, rdbPath, host string, now time.Time) string {
 	if now.YearDay() == 1 {
 		copyFile(archive, filepath.Join(yearly, filepath.Base(archive)))
 	}
-	if maxCopies > 0 {
-		rotateCopies(daily, maxCopies)
-	} else {
-		cleanupOldFiles(daily, keepDays)
-	}
+	cleanupOldFiles(daily, keepDays)
 	return archive
 }
 
@@ -979,6 +986,20 @@ func cleanupOldFiles(dir string, days int) {
 		if info, err := os.Stat(f); err == nil && info.ModTime().Before(cutoff) {
 			log.Printf("🧹 Deleting old archive %s", filepath.Base(f))
 			_ = os.Remove(f)
+			_ = os.Remove(f + ".meta")
+		}
+	}
+}
+
+func cleanupLongTermCopies(base string) {
+	for _, name := range []string{"weekly", "monthly", "yearly"} {
+		dir := filepath.Join(base, name)
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			continue
+		}
+		log.Printf("🧹 Removing legacy %s snapshots in strict --copies mode", name)
+		if err := os.RemoveAll(dir); err != nil {
+			log.Printf("%sCannot remove %s: %v%s", yellow, dir, err, reset)
 		}
 	}
 }
@@ -1065,6 +1086,7 @@ func rotateCopies(dir string, copies int) {
 	for _, f := range files[copies:] {
 		log.Printf("🧹 Deleting extra archive %s", filepath.Base(f))
 		_ = os.Remove(f)
+		_ = os.Remove(f + ".meta")
 	}
 }
 

@@ -38,6 +38,23 @@ type sftpCheckResult struct {
 	LatestFiles int
 }
 
+const sftpIOTimeout = 60 * time.Second
+
+type deadlineConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *deadlineConn) Read(p []byte) (int, error) {
+	_ = c.Conn.SetReadDeadline(time.Now().Add(c.timeout))
+	return c.Conn.Read(p)
+}
+
+func (c *deadlineConn) Write(p []byte) (int, error) {
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(c.timeout))
+	return c.Conn.Write(p)
+}
+
 type nativeSFTPSession struct {
 	ssh  *ssh.Client
 	sftp *sftp.Client
@@ -266,17 +283,16 @@ func dialNativeSFTP(acc sftpAccount) (*nativeSFTPSession, error) {
 		Timeout:         10 * time.Second,
 	}
 	addr := net.JoinHostPort(acc.Host, strconv.Itoa(normalizedSFTPPort(acc.Port)))
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	rawConn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("connect %s: %w", addr, err)
 	}
-	_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
+	conn := &deadlineConn{Conn: rawConn, timeout: sftpIOTimeout}
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("SSH %s: %w", addr, err)
 	}
-	_ = conn.SetDeadline(time.Time{})
 	sshClient := ssh.NewClient(sshConn, chans, reqs)
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
