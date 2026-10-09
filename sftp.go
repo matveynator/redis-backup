@@ -35,16 +35,16 @@ type sftpCheckResult struct {
 }
 
 var (
-	sftpConfFile    string
-	sftpHost        string
-	sftpPort        int
-	sftpUser        string
-	sftpKeyFile     string
-	sftpKnownHosts  string
-	sftpRoot        string
-	sftpKeepFactor  int
-	sftpAccounts    []sftpAccount
-	sftpEnabled     bool
+	sftpConfFile     string
+	sftpHost         string
+	sftpPort         int
+	sftpUser         string
+	sftpKeyFile      string
+	sftpKnownHosts   string
+	sftpRoot         string
+	sftpKeepFactor   int
+	sftpAccounts     []sftpAccount
+	sftpEnabled      bool
 	sftpInitProblems []string
 )
 
@@ -60,29 +60,8 @@ func init() {
 }
 
 func initSFTP() {
-	sftpAccounts = nil
 	sftpInitProblems = nil
-	// Match the existing FTP override semantics: an explicit --sftp-host
-	// replaces every target from the config file instead of adding to them.
-	if sftpHost == "" && sftpConfFile != "" {
-		if _, err := os.Stat(sftpConfFile); err == nil {
-			if err := parseSFTPConf(sftpConfFile); err != nil {
-				log.Printf("%sSFTP config %s: %v%s", yellow, sftpConfFile, err, reset)
-			}
-		}
-	}
-	if sftpHost != "" {
-		sftpAccounts = append(sftpAccounts, sftpAccount{
-			Host:       sftpHost,
-			Port:       normalizedSFTPPort(sftpPort),
-			User:       sftpUser,
-			KeyFile:    sftpKeyFile,
-			KnownHosts: sftpKnownHosts,
-			Root:       normalizedSFTPRoot(sftpRoot),
-		})
-	}
-
-	configured := append([]sftpAccount(nil), sftpAccounts...)
+	configured := loadSFTPAccounts()
 	sftpAccounts = nil
 	for _, acc := range configured {
 		log.Printf("%s🔎 SFTP probing %s:%d (user %s) for a writable directory%s", cyan, acc.Host, acc.Port, acc.User, reset)
@@ -98,6 +77,31 @@ func initSFTP() {
 		log.Printf("%s🔐 SFTP replication target → %s:%d (user %s), writable root %s%s", cyan, acc.Host, acc.Port, acc.User, acc.Root, reset)
 	}
 	sftpEnabled = len(configured) > 0
+}
+
+func loadSFTPAccounts() []sftpAccount {
+	// Match the existing FTP override semantics: an explicit --sftp-host
+	// replaces every target from the config file instead of adding to them.
+	if sftpHost != "" {
+		return []sftpAccount{{
+			Host:       sftpHost,
+			Port:       normalizedSFTPPort(sftpPort),
+			User:       sftpUser,
+			KeyFile:    sftpKeyFile,
+			KnownHosts: sftpKnownHosts,
+			Root:       normalizedSFTPRoot(sftpRoot),
+		}}
+	}
+
+	sftpAccounts = nil
+	if sftpConfFile != "" {
+		if _, err := os.Stat(sftpConfFile); err == nil {
+			if err := parseSFTPConf(sftpConfFile); err != nil {
+				log.Printf("%sSFTP config %s: %v%s", yellow, sftpConfFile, err, reset)
+			}
+		}
+	}
+	return append([]sftpAccount(nil), sftpAccounts...)
 }
 
 func parseSFTPConf(file string) error {
