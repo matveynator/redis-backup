@@ -48,6 +48,8 @@ var (
 	sftpInitProblems []string
 )
 
+var sftpProbeBatch = sftpBatch
+
 func init() {
 	flag.StringVar(&sftpConfFile, "sftp-conf", "/etc/sftp-backup.conf", "Path to SFTP configuration file")
 	flag.StringVar(&sftpHost, "sftp-host", "", "Override SFTP host")
@@ -240,17 +242,64 @@ func writableSFTPRootCandidates(acc sftpAccount) []string {
 	return candidates
 }
 
+func isTerminalSFTPProbeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	terminal := []string{
+		"sftp binary not found",
+		"could not resolve hostname",
+		"name or service not known",
+		"temporary failure in name resolution",
+		"nodename nor servname provided",
+		"no address associated with hostname",
+		"connection timed out",
+		"operation timed out",
+		"connection refused",
+		"no route to host",
+		"network is unreachable",
+		"host is down",
+		"connection reset",
+		"connection closed",
+		"closed by remote host",
+		"lost connection",
+		"broken pipe",
+		"connection aborted",
+		"subsystem request failed",
+		"host key verification failed",
+		"remote host identification has changed",
+		"no matching host key type found",
+		"no matching key exchange method found",
+		"no matching cipher found",
+		"permission denied (publickey",
+		"authentication failed",
+		"no supported authentication methods",
+		"too many authentication failures",
+		"kex_exchange_identification",
+		"ssh_exchange_identification",
+		"banner exchange",
+		"received disconnect",
+		"bad configuration option",
+	}
+	for _, needle := range terminal {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func resolveWritableSFTPRoot(acc sftpAccount) (string, error) {
+	root := normalizedSFTPRoot(acc.Root)
+	explicitRoot := root != "auto"
 	var failures []string
 	for _, candidate := range writableSFTPRootCandidates(acc) {
-		if err := probeWritableSFTPRoot(acc, candidate); err == nil {
+		if err := probeWritableSFTPRoot(acc, candidate, explicitRoot); err == nil {
 			return candidate, nil
 		} else {
 			failures = append(failures, fmt.Sprintf("%s: %v", candidate, err))
-			// A transport/subsystem reset is independent of directory permissions;
-			// trying every candidate would only reconnect repeatedly and spam logs.
-			msg := strings.ToLower(err.Error())
-			if strings.Contains(msg, "connection reset") || strings.Contains(msg, "connection closed") || strings.Contains(msg, "subsystem request failed") {
+			if isTerminalSFTPProbeError(err) {
 				break
 			}
 		}
@@ -261,14 +310,18 @@ func resolveWritableSFTPRoot(acc sftpAccount) (string, error) {
 	return "", fmt.Errorf("no writable SFTP root found (%s)", strings.Join(failures, "; "))
 }
 
-func probeWritableSFTPRoot(acc sftpAccount, root string) error {
+func probeWritableSFTPRoot(acc sftpAccount, root string, createRoot bool) error {
 	probeName := fmt.Sprintf(".redis-backup-write-test-%d-%d", os.Getpid(), time.Now().UnixNano())
 	probePath := probeName
 	if root != "." {
 		probePath = path.Join(root, probeName)
 	}
-	commands := fmt.Sprintf("mkdir %s\nrmdir %s\n", sftpQuote(probePath), sftpQuote(probePath))
-	_, err := sftpBatch(acc, commands)
+	var commands strings.Builder
+	if createRoot && root != "." && root != "/" {
+		commands.WriteString(mkdirBatch(root))
+	}
+	fmt.Fprintf(&commands, "mkdir %s\nrmdir %s\n", sftpQuote(probePath), sftpQuote(probePath))
+	_, err := sftpProbeBatch(acc, commands.String())
 	return err
 }
 
