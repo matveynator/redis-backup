@@ -35,16 +35,17 @@ type sftpCheckResult struct {
 }
 
 var (
-	sftpConfFile   string
-	sftpHost       string
-	sftpPort       int
-	sftpUser       string
-	sftpKeyFile    string
-	sftpKnownHosts string
-	sftpRoot       string
-	sftpKeepFactor int
-	sftpAccounts   []sftpAccount
-	sftpEnabled    bool
+	sftpConfFile    string
+	sftpHost        string
+	sftpPort        int
+	sftpUser        string
+	sftpKeyFile     string
+	sftpKnownHosts  string
+	sftpRoot        string
+	sftpKeepFactor  int
+	sftpAccounts    []sftpAccount
+	sftpEnabled     bool
+	sftpInitProblems []string
 )
 
 func init() {
@@ -54,12 +55,13 @@ func init() {
 	flag.StringVar(&sftpUser, "sftp-user", "", "SFTP username")
 	flag.StringVar(&sftpKeyFile, "sftp-key", "", "SFTP private key file (optional; OpenSSH defaults/agent are used when empty)")
 	flag.StringVar(&sftpKnownHosts, "sftp-known-hosts", "", "known_hosts file (optional; OpenSSH default is used when empty)")
-	flag.StringVar(&sftpRoot, "sftp-root", "/", "Remote root directory for backups")
+	flag.StringVar(&sftpRoot, "sftp-root", "auto", "Remote root directory for backups (default: auto-detect writable directory)")
 	flag.IntVar(&sftpKeepFactor, "sftp-keep-factor", 4, "Retention multiplier for SFTP")
 }
 
 func initSFTP() {
 	sftpAccounts = nil
+	sftpInitProblems = nil
 	// Match the existing FTP override semantics: an explicit --sftp-host
 	// replaces every target from the config file instead of adding to them.
 	if sftpHost == "" && sftpConfFile != "" {
@@ -79,10 +81,23 @@ func initSFTP() {
 			Root:       normalizedSFTPRoot(sftpRoot),
 		})
 	}
-	sftpEnabled = len(sftpAccounts) > 0
-	for _, acc := range sftpAccounts {
-		log.Printf("%s🔐 SFTP replication target → %s:%d (user %s)%s", cyan, acc.Host, acc.Port, acc.User, reset)
+
+	configured := append([]sftpAccount(nil), sftpAccounts...)
+	sftpAccounts = nil
+	for _, acc := range configured {
+		log.Printf("%s🔎 SFTP probing %s:%d (user %s) for a writable directory%s", cyan, acc.Host, acc.Port, acc.User, reset)
+		root, err := resolveWritableSFTPRoot(acc)
+		if err != nil {
+			problem := fmt.Sprintf("SFTP %s:%d user %s: %v", acc.Host, acc.Port, acc.User, err)
+			sftpInitProblems = append(sftpInitProblems, problem)
+			log.Printf("%s%s; target disabled for this run%s", red, problem, reset)
+			continue
+		}
+		acc.Root = root
+		sftpAccounts = append(sftpAccounts, acc)
+		log.Printf("%s🔐 SFTP replication target → %s:%d (user %s), writable root %s%s", cyan, acc.Host, acc.Port, acc.User, acc.Root, reset)
 	}
+	sftpEnabled = len(configured) > 0
 }
 
 func parseSFTPConf(file string) error {
@@ -145,8 +160,11 @@ func normalizedSFTPPort(p int) int {
 
 func normalizedSFTPRoot(root string) string {
 	root = strings.TrimSpace(root)
-	if root == "" {
-		return "/"
+	if root == "" || strings.EqualFold(root, "auto") {
+		return "auto"
+	}
+	if root == "." {
+		return "."
 	}
 	if !strings.HasPrefix(root, "/") {
 		root = "/" + root
@@ -164,7 +182,10 @@ func sftpCommand(acc sftpAccount) (*exec.Cmd, error) {
 		"-P", strconv.Itoa(normalizedSFTPPort(acc.Port)),
 		"-oBatchMode=yes",
 		"-oConnectTimeout=10",
-		"-oStrictHostKeyChecking=yes",
+		"-oConnectionAttempts=2",
+		"-oServerAliveInterval=15",
+		"-oServerAliveCountMax=2",
+		"-oStrictHostKeyChecking=accept-new",
 	}
 	if acc.KeyFile != "" {
 		args = append(args, "-i", acc.KeyFile)
@@ -194,7 +215,7 @@ func sftpBatch(acc sftpAccount, commands string) (string, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return stdout.String(), fmt.Errorf("%s", msg)
+		return stdout.String(), fmt.Errorf("host=%s port=%d user=%s: %s", acc.Host, normalizedSFTPPort(acc.Port), acc.User, msg)
 	}
 	return stdout.String(), nil
 }
@@ -203,9 +224,57 @@ func sftpQuote(s string) string {
 	return "\"" + strings.ReplaceAll(strings.ReplaceAll(s, "\\", "\\\\"), "\"", "\\\"") + "\""
 }
 
+func writableSFTPRootCandidates(acc sftpAccount) []string {
+	root := normalizedSFTPRoot(acc.Root)
+	if root != "auto" {
+		return []string{root}
+	}
+	candidates := []string{".", "/data", "/backup", "/backups", "/upload", "/uploads"}
+	if acc.User != "" {
+		candidates = append(candidates, "/home/"+acc.User)
+	}
+	return candidates
+}
+
+func resolveWritableSFTPRoot(acc sftpAccount) (string, error) {
+	var failures []string
+	for _, candidate := range writableSFTPRootCandidates(acc) {
+		if err := probeWritableSFTPRoot(acc, candidate); err == nil {
+			return candidate, nil
+		} else {
+			failures = append(failures, fmt.Sprintf("%s: %v", candidate, err))
+			// A transport/subsystem reset is independent of directory permissions;
+			// trying every candidate would only reconnect repeatedly and spam logs.
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "connection reset") || strings.Contains(msg, "connection closed") || strings.Contains(msg, "subsystem request failed") {
+				break
+			}
+		}
+	}
+	if len(failures) == 0 {
+		return "", fmt.Errorf("no SFTP writable-root candidates")
+	}
+	return "", fmt.Errorf("no writable SFTP root found (%s)", strings.Join(failures, "; "))
+}
+
+func probeWritableSFTPRoot(acc sftpAccount, root string) error {
+	probeName := fmt.Sprintf(".redis-backup-write-test-%d-%d", os.Getpid(), time.Now().UnixNano())
+	probePath := probeName
+	if root != "." {
+		probePath = path.Join(root, probeName)
+	}
+	commands := fmt.Sprintf("mkdir %s\nrmdir %s\n", sftpQuote(probePath), sftpQuote(probePath))
+	_, err := sftpBatch(acc, commands)
+	return err
+}
+
 func remoteSFTPPath(acc sftpAccount, remoteRel string) string {
 	rel := strings.TrimPrefix(filepath.ToSlash(remoteRel), "/")
-	return path.Join(normalizedSFTPRoot(acc.Root), rel)
+	root := normalizedSFTPRoot(acc.Root)
+	if root == "auto" || root == "." {
+		return path.Clean(rel)
+	}
+	return path.Join(root, rel)
 }
 
 func mkdirBatch(remoteDir string) string {
@@ -213,21 +282,30 @@ func mkdirBatch(remoteDir string) string {
 	if remoteDir == "." || remoteDir == "/" {
 		return ""
 	}
+	absolute := strings.HasPrefix(remoteDir, "/")
 	parts := strings.Split(strings.TrimPrefix(remoteDir, "/"), "/")
 	cur := ""
 	var b strings.Builder
 	for _, part := range parts {
-		if part == "" {
+		if part == "" || part == "." {
 			continue
 		}
-		cur += "/" + part
+		if cur == "" {
+			if absolute {
+				cur = "/" + part
+			} else {
+				cur = part
+			}
+		} else {
+			cur = path.Join(cur, part)
+		}
 		fmt.Fprintf(&b, "-mkdir %s\n", sftpQuote(cur))
 	}
 	return b.String()
 }
 
 func uploadToSFTP(localPath, remoteRel string) {
-	if !sftpEnabled {
+	if !sftpEnabled || len(sftpAccounts) == 0 {
 		return
 	}
 	for _, acc := range sftpAccounts {
@@ -241,7 +319,7 @@ func uploadToSFTP(localPath, remoteRel string) {
 			continue
 		}
 		remoteDaily := path.Dir(remotePath)
-		if strings.Contains(remotePath, "/daily/") {
+		if strings.Contains("/"+remotePath, "/daily/") {
 			if maxCopies > 0 {
 				rotateCopiesSFTP(acc, remoteDaily, maxCopies*sftpKeepFactor)
 			} else {
@@ -318,7 +396,11 @@ func cleanupOldFilesSFTP(acc sftpAccount, remoteDir string, days int) {
 
 func checkSFTPBackups(host string, ports []string, threshold time.Time) sftpCheckResult {
 	result := sftpCheckResult{}
-	if !sftpEnabled {
+	for _, problem := range sftpInitProblems {
+		result.Problems = append(result.Problems, problem)
+		result.Severity = max(result.Severity, 2)
+	}
+	if !sftpEnabled || len(sftpAccounts) == 0 {
 		return result
 	}
 	expectedCopies := 0
