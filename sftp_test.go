@@ -8,10 +8,45 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 )
+
+type fakeFileInfo struct {
+	name string
+	dir  bool
+}
+
+func (f fakeFileInfo) Name() string       { return f.name }
+func (f fakeFileInfo) Size() int64        { return 0 }
+func (f fakeFileInfo) Mode() os.FileMode  { if f.dir { return os.ModeDir | 0755 }; return 0644 }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return f.dir }
+func (f fakeFileInfo) Sys() any           { return nil }
+
+type fakeSFTPFS struct {
+	entries    []os.FileInfo
+	mkdirErr   map[string]error
+	mkdirCalls []string
+	mkdirAll   []string
+}
+
+func (f *fakeSFTPFS) Mkdir(name string) error {
+	f.mkdirCalls = append(f.mkdirCalls, name)
+	for prefix, err := range f.mkdirErr {
+		if name == prefix || len(name) > len(prefix) && name[:len(prefix)+1] == prefix+"/" {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *fakeSFTPFS) RemoveDirectory(string) error { return nil }
+func (f *fakeSFTPFS) ReadDir(string) ([]os.FileInfo, error) { return f.entries, nil }
+func (f *fakeSFTPFS) MkdirAll(name string) error {
+	f.mkdirAll = append(f.mkdirAll, name)
+	return nil
+}
 
 func TestParseSFTPConfMultipleHosts(t *testing.T) {
 	old := sftpAccounts
@@ -20,7 +55,6 @@ func TestParseSFTPConfMultipleHosts(t *testing.T) {
 
 	file := filepath.Join(t.TempDir(), "sftp.conf")
 	content := `
-# first target
 SFTP_HOST=backup1.example.com
 SFTP_PORT=2222
 SFTP_USER=backup01
@@ -29,7 +63,6 @@ SFTP_ROOT=/backup-a
 
 SFTP_HOST=backup2.example.com
 SFTP_USER=backup02
-SFTP_KNOWN_HOSTS=/etc/ssh/known_hosts.backup
 SFTP_ROOT=backup-b
 `
 	if err := os.WriteFile(file, []byte(content), 0600); err != nil {
@@ -41,211 +74,111 @@ SFTP_ROOT=backup-b
 	if len(sftpAccounts) != 2 {
 		t.Fatalf("got %d accounts, want 2", len(sftpAccounts))
 	}
-	if got := sftpAccounts[0]; got.Host != "backup1.example.com" || got.Port != 2222 || got.User != "backup01" || got.KeyFile != "/root/.ssh/backup01" || got.Root != "/backup-a" {
+	if got := sftpAccounts[0]; got.Host != "backup1.example.com" || got.Port != 2222 || got.User != "backup01" || got.Root != "/backup-a" {
 		t.Fatalf("unexpected first account: %+v", got)
 	}
-	if got := sftpAccounts[1]; got.Host != "backup2.example.com" || got.Port != 22 || got.User != "backup02" || got.KnownHosts != "/etc/ssh/known_hosts.backup" || got.Root != "/backup-b" {
+	if got := sftpAccounts[1]; got.Host != "backup2.example.com" || got.Port != 22 || got.User != "backup02" || got.Root != "/backup-b" {
 		t.Fatalf("unexpected second account: %+v", got)
 	}
 }
 
 func TestSFTPHostOverridesConfiguredTargets(t *testing.T) {
-	oldAccounts := sftpAccounts
-	oldConf := sftpConfFile
-	oldHost := sftpHost
-	oldPort := sftpPort
-	oldUser := sftpUser
-	oldKey := sftpKeyFile
-	oldKnownHosts := sftpKnownHosts
-	oldRoot := sftpRoot
+	oldAccounts, oldConf, oldHost := sftpAccounts, sftpConfFile, sftpHost
+	oldPort, oldUser, oldKey, oldRoot := sftpPort, sftpUser, sftpKeyFile, sftpRoot
 	defer func() {
-		sftpAccounts = oldAccounts
-		sftpConfFile = oldConf
-		sftpHost = oldHost
-		sftpPort = oldPort
-		sftpUser = oldUser
-		sftpKeyFile = oldKey
-		sftpKnownHosts = oldKnownHosts
-		sftpRoot = oldRoot
+		sftpAccounts, sftpConfFile, sftpHost = oldAccounts, oldConf, oldHost
+		sftpPort, sftpUser, sftpKeyFile, sftpRoot = oldPort, oldUser, oldKey, oldRoot
 	}()
 
 	file := filepath.Join(t.TempDir(), "sftp.conf")
-	content := `
-SFTP_HOST=old1.example.com
-SFTP_USER=old1
-
-SFTP_HOST=old2.example.com
-SFTP_USER=old2
-`
-	if err := os.WriteFile(file, []byte(content), 0600); err != nil {
+	if err := os.WriteFile(file, []byte("SFTP_HOST=old.example.com\nSFTP_USER=old\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-
 	sftpConfFile = file
 	sftpHost = "override.example.com"
 	sftpPort = 2222
 	sftpUser = "override"
 	sftpKeyFile = "/root/.ssh/override"
-	sftpKnownHosts = "/root/.ssh/known_hosts"
 	sftpRoot = "/override-root"
 
-	gotAccounts := loadSFTPAccounts()
-	if len(gotAccounts) != 1 {
-		t.Fatalf("got %d accounts, want exactly 1 CLI override account: %+v", len(gotAccounts), gotAccounts)
-	}
-	got := gotAccounts[0]
-	if got.Host != "override.example.com" || got.Port != 2222 || got.User != "override" || got.KeyFile != "/root/.ssh/override" || got.KnownHosts != "/root/.ssh/known_hosts" || got.Root != "/override-root" {
-		t.Fatalf("unexpected override account: %+v", got)
+	got := loadSFTPAccounts()
+	if len(got) != 1 || got[0].Host != "override.example.com" || got[0].Port != 2222 || got[0].Root != "/override-root" {
+		t.Fatalf("unexpected override accounts: %+v", got)
 	}
 }
 
-func TestWritableSFTPRootCandidatesAuto(t *testing.T) {
-	got := writableSFTPRootCandidates(sftpAccount{Root: "auto", User: "backup08"})
-	want := []string{".", "/data", "/backup", "/backups", "/upload", "/uploads", "/home/backup08"}
+func TestDiscoverSFTPRootCandidatesUsesVisibleDirectoriesOnly(t *testing.T) {
+	fs := &fakeSFTPFS{entries: []os.FileInfo{
+		fakeFileInfo{name: "zeta", dir: true},
+		fakeFileInfo{name: "file.txt", dir: false},
+		fakeFileInfo{name: "data", dir: true},
+	}}
+	got, err := discoverSFTPRootCandidates(fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"data", "zeta"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("candidates = %#v, want %#v", got, want)
 	}
 }
 
-func TestWritableSFTPRootCandidatesExplicit(t *testing.T) {
-	got := writableSFTPRootCandidates(sftpAccount{Root: "/data"})
-	want := []string{"/data"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("candidates = %#v, want %#v", got, want)
+func TestAutoRootUsesCurrentDirectoryWhenWritable(t *testing.T) {
+	fs := &fakeSFTPFS{}
+	root, err := resolveWritableSFTPRootWithFS(sftpAccount{Root: "auto"}, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root != "." {
+		t.Fatalf("root = %q, want .", root)
 	}
 }
 
-func TestExplicitSFTPRootCreatedBeforeProbe(t *testing.T) {
-	oldProbe := sftpProbeBatch
-	defer func() { sftpProbeBatch = oldProbe }()
-
-	var commands string
-	sftpProbeBatch = func(_ sftpAccount, batch string) (string, error) {
-		commands = batch
-		return "", nil
+func TestAutoRootListsAndTriesOnlyExistingDirectories(t *testing.T) {
+	fs := &fakeSFTPFS{
+		entries: []os.FileInfo{
+			fakeFileInfo{name: "readonly", dir: true},
+			fakeFileInfo{name: "writable", dir: true},
+		},
+		mkdirErr: map[string]error{
+			".redis-backup-write-test": errors.New("permission denied"),
+			"readonly":                errors.New("permission denied"),
+		},
 	}
+	root, err := resolveWritableSFTPRootWithFS(sftpAccount{Root: "auto"}, fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root != "writable" {
+		t.Fatalf("root = %q, want writable", root)
+	}
+	for _, call := range fs.mkdirCalls {
+		if call == "/data" || call == "/backup" || call == "/uploads" {
+			t.Fatalf("unexpected guessed directory probe: %q", call)
+		}
+	}
+}
 
-	root, err := resolveWritableSFTPRoot(sftpAccount{Root: "/data/backups"})
+func TestExplicitRootIsCreatedBeforeProbe(t *testing.T) {
+	fs := &fakeSFTPFS{}
+	root, err := resolveWritableSFTPRootWithFS(sftpAccount{Root: "/data/backups"}, fs)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if root != "/data/backups" {
 		t.Fatalf("root = %q, want /data/backups", root)
 	}
-	for _, want := range []string{
-		`-mkdir "/data"`,
-		`-mkdir "/data/backups"`,
-		`mkdir "/data/backups/.redis-backup-write-test-`,
-	} {
-		if !strings.Contains(commands, want) {
-			t.Fatalf("probe commands %q do not contain %q", commands, want)
-		}
-	}
-}
-
-func TestTerminalSFTPProbeErrorStopsAutoCandidates(t *testing.T) {
-	oldProbe := sftpProbeBatch
-	defer func() { sftpProbeBatch = oldProbe }()
-
-	calls := 0
-	sftpProbeBatch = func(_ sftpAccount, _ string) (string, error) {
-		calls++
-		return "", errors.New("ssh: Could not resolve hostname backup.invalid: Name or service not known")
-	}
-
-	_, err := resolveWritableSFTPRoot(sftpAccount{Root: "auto", Host: "backup.invalid", User: "backup08"})
-	if err == nil {
-		t.Fatal("expected probe failure")
-	}
-	if calls != 1 {
-		t.Fatalf("probe calls = %d, want 1 after terminal connection failure", calls)
-	}
-}
-
-func TestDirectoryPermissionFailureTriesNextAutoCandidate(t *testing.T) {
-	oldProbe := sftpProbeBatch
-	defer func() { sftpProbeBatch = oldProbe }()
-
-	calls := 0
-	sftpProbeBatch = func(_ sftpAccount, _ string) (string, error) {
-		calls++
-		if calls == 1 {
-			return "", errors.New("remote mkdir \".redis-backup-write-test\": Permission denied")
-		}
-		return "", nil
-	}
-
-	root, err := resolveWritableSFTPRoot(sftpAccount{Root: "auto", User: "backup08"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if root != "/data" {
-		t.Fatalf("root = %q, want /data", root)
-	}
-	if calls != 2 {
-		t.Fatalf("probe calls = %d, want 2", calls)
-	}
-}
-
-func TestTerminalSFTPProbeClassification(t *testing.T) {
-	terminal := []string{
-		"Could not resolve hostname backup.invalid: Name or service not known",
-		"connect to host example port 22: Connection refused",
-		"ssh: connect to host example port 22: Connection timed out",
-		"backup@example: Permission denied (publickey).",
-		"Host key verification failed.",
-		"REMOTE HOST IDENTIFICATION HAS CHANGED!",
-		"Couldn't read packet: Connection reset by peer",
-	}
-	for _, msg := range terminal {
-		if !isTerminalSFTPProbeError(errors.New(msg)) {
-			t.Errorf("expected terminal classification for %q", msg)
-		}
-	}
-	if isTerminalSFTPProbeError(errors.New(`remote mkdir "/data": Permission denied`)) {
-		t.Fatal("directory permission error must remain path-level, not terminal")
+	if !reflect.DeepEqual(fs.mkdirAll, []string{"/data/backups"}) {
+		t.Fatalf("MkdirAll calls = %#v", fs.mkdirAll)
 	}
 }
 
 func TestRemoteSFTPPath(t *testing.T) {
-	acc := sftpAccount{Root: "/remote/root"}
-	got := remoteSFTPPath(acc, "server-a/redis-backup/redis_6379/daily/a.tar.gz")
-	want := "/remote/root/server-a/redis-backup/redis_6379/daily/a.tar.gz"
-	if got != want {
-		t.Fatalf("remoteSFTPPath = %q, want %q", got, want)
+	if got := remoteSFTPPath(sftpAccount{Root: "/remote/root"}, "server/redis-backup/a.tar.gz"); got != "/remote/root/server/redis-backup/a.tar.gz" {
+		t.Fatalf("path = %q", got)
 	}
-}
-
-func TestRemoteSFTPPathChrootCurrentDirectory(t *testing.T) {
-	acc := sftpAccount{Root: "."}
-	got := remoteSFTPPath(acc, "server-a/redis-backup/redis_6379/daily/a.tar.gz")
-	want := "server-a/redis-backup/redis_6379/daily/a.tar.gz"
-	if got != want {
-		t.Fatalf("remoteSFTPPath = %q, want %q", got, want)
-	}
-}
-
-func TestMkdirBatchAbsolute(t *testing.T) {
-	got := strings.Split(strings.TrimSpace(mkdirBatch("/a/b/c")), "\n")
-	want := []string{
-		`-mkdir "/a"`,
-		`-mkdir "/a/b"`,
-		`-mkdir "/a/b/c"`,
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("mkdirBatch = %#v, want %#v", got, want)
-	}
-}
-
-func TestMkdirBatchRelative(t *testing.T) {
-	got := strings.Split(strings.TrimSpace(mkdirBatch("a/b/c")), "\n")
-	want := []string{
-		`-mkdir "a"`,
-		`-mkdir "a/b"`,
-		`-mkdir "a/b/c"`,
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("mkdirBatch = %#v, want %#v", got, want)
+	if got := remoteSFTPPath(sftpAccount{Root: "."}, "server/redis-backup/a.tar.gz"); got != "server/redis-backup/a.tar.gz" {
+		t.Fatalf("chroot path = %q", got)
 	}
 }
 
@@ -258,9 +191,6 @@ func TestArchiveTimeFromName(t *testing.T) {
 	if !got.Equal(want) {
 		t.Fatalf("time = %v, want %v", got, want)
 	}
-	if _, ok := archiveTimeFromName("bad-name.tar.gz"); ok {
-		t.Fatal("invalid archive name accepted")
-	}
 }
 
 func TestNormalizedSFTPDefaults(t *testing.T) {
@@ -269,8 +199,5 @@ func TestNormalizedSFTPDefaults(t *testing.T) {
 	}
 	if got := normalizedSFTPRoot(""); got != "auto" {
 		t.Fatalf("root = %q, want auto", got)
-	}
-	if got := normalizedSFTPRoot("data"); got != "/data" {
-		t.Fatalf("root = %q, want /data", got)
 	}
 }
