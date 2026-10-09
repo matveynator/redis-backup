@@ -1,0 +1,257 @@
+name: Fix retention follow-up once
+
+on:
+  push:
+    branches:
+      - fix/retention-sftp-followup
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/retention-sftp-followup
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Patch retention, SFTP liveness, workflows and tests
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('redis-backup.go')
+          s = p.read_text()
+          old = '''func backupInstance(port, rdbPath, host string, now time.Time) string {
+          \tinst := "redis_" + port
+          \tbase := filepath.Join(backupPath, host, backupSubdir, inst)
+          \tdaily := filepath.Join(base, "daily")
+          \tweekly := filepath.Join(base, "weekly")
+          \tmonthly := filepath.Join(base, "monthly")
+          \tyearly := filepath.Join(base, "yearly")
+          \tfor _, d := range []string{daily, weekly, monthly, yearly} {
+          \t\tif err := os.MkdirAll(d, 0755); err != nil {
+          \t\t\tsuggestSudo(err)
+          \t\t\tlog.Printf("mkdir %s: %v", d, err)
+          \t\t\treturn ""
+          \t\t}
+          \t}
+          \tts := now.Format("2006-01-02_15-04-05")
+          \tarchive := filepath.Join(daily, fmt.Sprintf("%s_%s.tar.gz", ts, inst))
+          \tlog.Printf("%s📦 Archiving %s …%s", cyan, archive, reset)
+          \tif err := createTarGz(archive, []string{rdbPath}); err != nil {
+          \t\tsuggestSudo(err)
+          \t\tlog.Printf("%sArchive error: %v%s", red, err, reset)
+          \t\treturn ""
+          \t}
+          \tif err := writeBackupMeta(archive, rdbPath); err != nil {
+          \t\tlog.Printf("%sFailed to store backup metadata for %s: %v%s", yellow, archive, err, reset)
+          \t}
+          \tprintFileSize(archive)
+          \tif now.Weekday() == time.Sunday {
+          \t\tcopyFile(archive, filepath.Join(weekly, filepath.Base(archive)))
+          \t}
+          \tif now.Day() == 1 {
+          \t\tcopyFile(archive, filepath.Join(monthly, filepath.Base(archive)))
+          \t}
+          \tif now.YearDay() == 1 {
+          \t\tcopyFile(archive, filepath.Join(yearly, filepath.Base(archive)))
+          \t}
+          \tif maxCopies > 0 {
+          \t\trotateCopies(daily, maxCopies)
+          \t} else {
+          \t\tcleanupOldFiles(daily, keepDays)
+          \t}
+          \treturn archive
+          }
+          '''
+          new = '''func backupInstance(port, rdbPath, host string, now time.Time) string {
+          \tinst := "redis_" + port
+          \tbase := filepath.Join(backupPath, host, backupSubdir, inst)
+          \tdaily := filepath.Join(base, "daily")
+          \tif err := os.MkdirAll(daily, 0755); err != nil {
+          \t\tsuggestSudo(err)
+          \t\tlog.Printf("mkdir %s: %v", daily, err)
+          \t\treturn ""
+          \t}
+          \tts := now.Format("2006-01-02_15-04-05")
+          \tarchive := filepath.Join(daily, fmt.Sprintf("%s_%s.tar.gz", ts, inst))
+          \tlog.Printf("%s📦 Archiving %s …%s", cyan, archive, reset)
+          \tif err := createTarGz(archive, []string{rdbPath}); err != nil {
+          \t\tsuggestSudo(err)
+          \t\tlog.Printf("%sArchive error: %v%s", red, err, reset)
+          \t\treturn ""
+          \t}
+          \tif err := writeBackupMeta(archive, rdbPath); err != nil {
+          \t\tlog.Printf("%sFailed to store backup metadata for %s: %v%s", yellow, archive, err, reset)
+          \t}
+          \tprintFileSize(archive)
+          \tif maxCopies > 0 {
+          \t\trotateCopies(daily, maxCopies)
+          \t\treturn archive
+          \t}
+
+          \tweekly := filepath.Join(base, "weekly")
+          \tmonthly := filepath.Join(base, "monthly")
+          \tyearly := filepath.Join(base, "yearly")
+          \tfor _, d := range []string{weekly, monthly, yearly} {
+          \t\tif err := os.MkdirAll(d, 0755); err != nil {
+          \t\t\tsuggestSudo(err)
+          \t\t\tlog.Printf("mkdir %s: %v", d, err)
+          \t\t\treturn archive
+          \t\t}
+          \t}
+          \tif now.Weekday() == time.Sunday {
+          \t\tcopyFile(archive, filepath.Join(weekly, filepath.Base(archive)))
+          \t}
+          \tif now.Day() == 1 {
+          \t\tcopyFile(archive, filepath.Join(monthly, filepath.Base(archive)))
+          \t}
+          \tif now.YearDay() == 1 {
+          \t\tcopyFile(archive, filepath.Join(yearly, filepath.Base(archive)))
+          \t}
+          \tcleanupOldFiles(daily, keepDays)
+          \treturn archive
+          }
+          '''
+          if old not in s:
+              raise SystemExit('backupInstance block not found')
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('sftp.go')
+          s = p.read_text()
+          marker = '''type nativeSFTPSession struct {
+          \tssh  *ssh.Client
+          \tsftp *sftp.Client
+          }
+          '''
+          replacement = '''const sftpIOTimeout = 60 * time.Second
+
+          type deadlineConn struct {
+          \tnet.Conn
+          \ttimeout time.Duration
+          }
+
+          func (c *deadlineConn) Read(p []byte) (int, error) {
+          \t_ = c.Conn.SetReadDeadline(time.Now().Add(c.timeout))
+          \treturn c.Conn.Read(p)
+          }
+
+          func (c *deadlineConn) Write(p []byte) (int, error) {
+          \t_ = c.Conn.SetWriteDeadline(time.Now().Add(c.timeout))
+          \treturn c.Conn.Write(p)
+          }
+
+          type nativeSFTPSession struct {
+          \tssh  *ssh.Client
+          \tsftp *sftp.Client
+          }
+          '''
+          if marker not in s:
+              raise SystemExit('nativeSFTPSession marker not found')
+          s = s.replace(marker, replacement, 1)
+          old = '''\tconn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+          \tif err != nil {
+          \t\treturn nil, fmt.Errorf("connect %s: %w", addr, err)
+          \t}
+          \t_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
+          \tsshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
+          \tif err != nil {
+          \t\t_ = conn.Close()
+          \t\treturn nil, fmt.Errorf("SSH %s: %w", addr, err)
+          \t}
+          \t_ = conn.SetDeadline(time.Time{})
+          '''
+          new = '''\trawConn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+          \tif err != nil {
+          \t\treturn nil, fmt.Errorf("connect %s: %w", addr, err)
+          \t}
+          \tconn := &deadlineConn{Conn: rawConn, timeout: sftpIOTimeout}
+          \tsshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
+          \tif err != nil {
+          \t\t_ = conn.Close()
+          \t\treturn nil, fmt.Errorf("SSH %s: %w", addr, err)
+          \t}
+          '''
+          if old not in s:
+              raise SystemExit('dial block not found')
+          p.write_text(s.replace(old, new, 1))
+
+          for wf in [Path('.github/workflows/test.yml'), Path('.github/workflows/release.yml')]:
+              text = wf.read_text()
+              text = text.replace('go-version: "1.22"', 'go-version-file: go.mod')
+              wf.write_text(text)
+          PY
+
+          cat > retention_test.go <<'EOF'
+          //go:build !windows
+          // +build !windows
+
+          package main
+
+          import (
+              "os"
+              "path/filepath"
+              "testing"
+              "time"
+          )
+
+          func TestCopiesModeKeepsOnlyDailySnapshots(t *testing.T) {
+              oldBackupPath, oldMaxCopies, oldKeepDays := backupPath, maxCopies, keepDays
+              defer func() {
+                  backupPath, maxCopies, keepDays = oldBackupPath, oldMaxCopies, oldKeepDays
+              }()
+
+              backupPath = t.TempDir()
+              maxCopies = 1
+              keepDays = 30
+              rdb := filepath.Join(t.TempDir(), "dump.rdb")
+              if err := os.WriteFile(rdb, []byte("REDIS0011-test"), 0644); err != nil {
+                  t.Fatal(err)
+              }
+
+              host := "redis01"
+              first := time.Date(2026, 10, 4, 0, 45, 1, 0, time.Local)
+              second := first.Add(8 * time.Hour)
+              if got := backupInstance("6379", rdb, host, first); got == "" {
+                  t.Fatal("first backup failed")
+              }
+              if got := backupInstance("6379", rdb, host, second); got == "" {
+                  t.Fatal("second backup failed")
+              }
+
+              base := filepath.Join(backupPath, host, backupSubdir, "redis_6379")
+              archives, err := filepath.Glob(filepath.Join(base, "daily", "*.tar.gz"))
+              if err != nil {
+                  t.Fatal(err)
+              }
+              if len(archives) != 1 {
+                  t.Fatalf("daily archives = %d, want 1", len(archives))
+              }
+              for _, name := range []string{"weekly", "monthly", "yearly"} {
+                  if _, err := os.Stat(filepath.Join(base, name)); !os.IsNotExist(err) {
+                      t.Fatalf("%s directory should not exist in --copies mode", name)
+                  }
+              }
+          }
+          EOF
+
+      - name: Tidy, format and test
+        run: |
+          go mod tidy
+          gofmt -w redis-backup.go sftp.go retention_test.go
+          go test ./...
+      - name: Commit fixes and remove one-shot workflow
+        run: |
+          rm .github/workflows/fix-retention-followup-once.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "Fix strict copy retention and SFTP liveness"
+          git push origin HEAD:fix/retention-sftp-followup
