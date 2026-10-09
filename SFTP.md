@@ -1,178 +1,133 @@
 # SFTP backups
 
-`redis-backup` can replicate every Redis archive to one or more SFTP servers in addition to FTP.
+`redis-backup` can replicate Redis archives to one or more SFTP servers in addition to FTP.
 
-The SFTP backend uses the system OpenSSH `sftp` client. Authentication therefore uses normal SSH keys, `ssh-agent` and `~/.ssh/config`; passwords are not put on the command line.
+SFTP is implemented directly in Go. The server does **not** need the `ssh` or `sftp` command-line clients installed. `redis-backup` opens SSH/SFTP connections itself.
 
-## Where the settings are
+## Configuration
 
-The default configuration file is:
+Default configuration file:
 
 ```text
 /etc/sftp-backup.conf
 ```
 
-Example:
+Recommended example:
 
 ```ini
 SFTP_HOST=static.213-133-127-244.clients.your-server.de
 SFTP_PORT=22
-SFTP_USER=backup08
+SFTP_USER=backup12
 SFTP_KEY=/root/.ssh/id_ed25519
 SFTP_ROOT=auto
 ```
 
-`SFTP_ROOT=auto` is the recommended/default mode.
+Multiple `SFTP_HOST` sections can be placed in the same file.
 
-Each new `SFTP_HOST` starts another target, so one config file can contain multiple independent SFTP backup servers.
+## Authentication
 
-```ini
-SFTP_HOST=backup1.example.com
-SFTP_USER=backup01
-SFTP_KEY=/root/.ssh/backup01
-SFTP_ROOT=auto
-
-SFTP_HOST=backup2.example.com
-SFTP_PORT=2222
-SFTP_USER=backup02
-SFTP_KEY=/root/.ssh/backup02
-SFTP_ROOT=/data
-```
-
-## Automatic writable-directory detection
-
-Before the first archive upload, `redis-backup` connects to every configured SFTP target and performs a very small write test. It creates and immediately removes a temporary directory. Large Redis archives are not uploaded until this test succeeds.
-
-With `SFTP_ROOT=auto`, the following locations are tried in order:
-
-```text
-.
-/data
-/backup
-/backups
-/upload
-/uploads
-/home/<SFTP_USER>
-```
-
-The first writable location becomes the SFTP root for the rest of that run.
-
-Example log:
-
-```text
-SFTP probing backup.example.com:22 (user backup08) for a writable directory
-SFTP replication target -> backup.example.com:22 (user backup08), writable root /data
-```
-
-This is useful for chrooted `internal-sftp` accounts where `/` is intentionally owned by `root:root` and cannot be written by the backup user, while a directory such as `/data` is writable.
-
-If no candidate is writable, that SFTP target is disabled for the run before any multi-gigabyte archive upload is attempted. `--check` reports the target as CRITICAL.
-
-If the connection itself is reset or the SFTP subsystem cannot start, candidate probing stops immediately because changing the directory cannot fix a transport/server-side failure. The error includes host, port and user for diagnosis.
-
-## Explicit SFTP root
-
-To force one location instead of auto-detection:
+`SFTP_KEY` may point to an SSH private key:
 
 ```ini
-SFTP_ROOT=/data
+SFTP_KEY=/root/.ssh/id_ed25519
 ```
 
-Only `/data` is tested. If it is not writable, the target is disabled for that run.
+If it is omitted, `redis-backup` tries the SSH agent and standard keys in `~/.ssh/` (`id_ed25519`, `id_ecdsa`, `id_rsa`).
 
-For a chroot where the SFTP login starts directly inside a writable directory, you can use:
+Host keys are accepted silently. The native Go SSH client does not prompt for `known_hosts` confirmation. `SFTP_KNOWN_HOSTS` is retained only for configuration compatibility and is ignored by the native backend.
+
+## Automatic writable-directory discovery
+
+`SFTP_ROOT=auto` is the default and recommended mode.
+
+The program does **not** guess directory names such as `/data`, `/backup` or `/uploads`.
+
+It does this instead:
+
+1. Opens one native SSH/SFTP session.
+2. Tries a tiny create/remove write probe in the current SFTP directory (`.`).
+3. If `.` is not writable, lists the actual visible entries with the SFTP API (`ReadDir(".")`).
+4. Keeps only entries that really exist and are directories.
+5. Tries the same tiny write probe inside each visible directory.
+6. Uses the first writable directory as the SFTP root for the current run.
+
+This works well with chrooted SFTP accounts where the chroot root is intentionally read-only but one of its child directories is writable.
+
+Example layout:
+
+```text
+/backup/backup12/        root:root
+/backup/backup12/data/   backup12:backup12
+```
+
+The SFTP user sees `data` after login. `redis-backup` discovers it from the server and selects it automatically.
+
+If the connection, authentication or SFTP subsystem fails, discovery stops immediately; it does not repeat connection attempts for guessed paths.
+
+## Explicit root
+
+You can force a path:
+
+```ini
+SFTP_ROOT=/data/backups
+```
+
+For an explicit root, `redis-backup` creates the directory hierarchy with the native SFTP API before testing write access. This preserves first-run behavior when the destination does not exist yet.
+
+For a login that starts directly inside a writable chroot directory:
 
 ```ini
 SFTP_ROOT=.
 ```
 
-Relative paths stay relative; `redis-backup` does not incorrectly turn them into `/redis01/...` absolute paths.
-
-## Host key handling
-
-The client uses:
-
-```text
-StrictHostKeyChecking=accept-new
-```
-
-A previously unseen host key is accepted and written to `known_hosts` automatically. A changed key is still rejected, protecting against unexpected host-key replacement.
-
-To use a dedicated known-hosts file:
-
-```ini
-SFTP_KNOWN_HOSTS=/root/.ssh/known_hosts
-```
-
-## SSH authentication
-
-Recommended key-based setup:
-
-```ini
-SFTP_USER=backup08
-SFTP_KEY=/root/.ssh/id_ed25519
-```
-
-`SFTP_KEY` is optional. If omitted, OpenSSH uses the normal SSH agent, default identity files and SSH config rules.
-
-Connections are non-interactive (`BatchMode=yes`) and use connection/keepalive timeouts suitable for unattended backups.
-
-## Command-line override
-
-A single target can be supplied directly:
-
-```text
---sftp-host backup.example.com
---sftp-port 22
---sftp-user backup08
---sftp-key /root/.ssh/id_ed25519
---sftp-root auto
---sftp-known-hosts /root/.ssh/known_hosts
---sftp-keep-factor 4
-```
-
-When `--sftp-host` is specified, it replaces all targets from `/etc/sftp-backup.conf`. It does not append to the configured list.
+Relative paths remain relative.
 
 ## Remote path layout
 
-After the writable root is selected, the normal backup structure is preserved. For example, if `/data` is selected:
+If the selected root is `data`:
 
 ```text
-/data/redis01/redis-backup/redis_6385/daily/2026-10-09_03-50-23_redis_6385.tar.gz
+data/redis01/redis-backup/redis_6385/daily/2026-10-09_03-50-23_redis_6385.tar.gz
 ```
 
-If `.` is selected:
+If the selected root is `.`:
 
 ```text
 redis01/redis-backup/redis_6385/daily/2026-10-09_03-50-23_redis_6385.tar.gz
 ```
 
-Archives are uploaded as `*.part` and renamed only after a successful transfer. Incomplete uploads are therefore not treated as valid backups.
+Uploads are written as `*.part` first and renamed only after a complete transfer.
+
+## Command-line override
+
+```text
+--sftp-host backup.example.com
+--sftp-port 22
+--sftp-user backup12
+--sftp-key /root/.ssh/id_ed25519
+--sftp-root auto
+--sftp-keep-factor 4
+```
+
+When `--sftp-host` is supplied, targets from `/etc/sftp-backup.conf` are replaced rather than appended.
 
 ## Retention
 
-SFTP uses the same retention model as FTP:
+With `--copies N`, SFTP keeps:
 
-- with `--copies N`, SFTP keeps `N × --sftp-keep-factor` daily archives;
-- without `--copies`, SFTP retention is `--days × --sftp-keep-factor` days.
+```text
+N × --sftp-keep-factor
+```
 
-The default SFTP retention multiplier is `4`.
+daily archives.
+
+Without `--copies`, the retention period is `--days × --sftp-keep-factor`.
 
 ## Monitoring
 
-`--check <hours>` checks every configured SFTP host and Redis port.
+`--check <hours>` checks each configured SFTP target and Redis port using the native SFTP client. One SFTP session is reused for all Redis ports on the same target during a check.
 
-It reports CRITICAL when:
-
-- the SFTP target cannot initialize;
-- no writable root can be found;
-- the connection/subsystem fails;
-- the remote backup is missing;
-- the newest backup is older than the requested threshold.
-
-It reports WARNING when fewer retained copies exist than requested.
-
-The remote freshness check uses the timestamp in the archive filename and does not download or decompress the remote backup.
+CRITICAL is reported when the target cannot initialize, authentication/SFTP fails, no writable root is found, a backup is missing, or the newest backup is too old.
 
 Example:
 
@@ -180,37 +135,8 @@ Example:
 redis-backup --check 24 --copies 2 --sftp-keep-factor 4
 ```
 
-## Troubleshooting `Connection reset by peer`
-
-If auto-detection reports a transport reset such as:
-
-```text
-Couldn't read packet: Connection reset by peer
-```
-
-this normally happens before directory permissions can be tested. Check the SFTP server's SSH logs and chroot configuration, especially `internal-sftp`, `ChrootDirectory`, ownership/modes and whether the requested SFTP subsystem is allowed.
-
-Typical server-side log commands on Debian/Ubuntu are:
-
-```bash
-journalctl -u ssh -n 100 --no-pager
-```
-
-or:
-
-```bash
-tail -100 /var/log/auth.log
-```
-
-For OpenSSH chroot setups, the chroot directory itself normally must be owned by `root` and not writable by the SFTP user. Put writable storage below it, for example:
-
-```text
-/backup/backup08       root:root
-/backup/backup08/data  backup08:backup08
-```
-
-Then `SFTP_ROOT=auto` should discover `/data` automatically.
+Remote archives are listed through SFTP; they are not downloaded or decompressed during monitoring.
 
 ## Requirements
 
-The OpenSSH `sftp` executable must be installed and usable non-interactively with SSH keys or an SSH agent.
+No external SSH/SFTP client is required. Only network access to the SSH/SFTP server and a usable SSH private key or SSH agent are needed.
