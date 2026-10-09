@@ -50,7 +50,6 @@ SFTP_ROOT=backup-b
 
 func TestSFTPHostOverridesConfiguredTargets(t *testing.T) {
 	oldAccounts := sftpAccounts
-	oldEnabled := sftpEnabled
 	oldConf := sftpConfFile
 	oldHost := sftpHost
 	oldPort := sftpPort
@@ -60,7 +59,6 @@ func TestSFTPHostOverridesConfiguredTargets(t *testing.T) {
 	oldRoot := sftpRoot
 	defer func() {
 		sftpAccounts = oldAccounts
-		sftpEnabled = oldEnabled
 		sftpConfFile = oldConf
 		sftpHost = oldHost
 		sftpPort = oldPort
@@ -90,14 +88,29 @@ SFTP_USER=old2
 	sftpKnownHosts = "/root/.ssh/known_hosts"
 	sftpRoot = "/override-root"
 
-	initSFTP()
-
-	if len(sftpAccounts) != 1 {
-		t.Fatalf("got %d accounts, want exactly 1 CLI override account: %+v", len(sftpAccounts), sftpAccounts)
+	gotAccounts := loadSFTPAccounts()
+	if len(gotAccounts) != 1 {
+		t.Fatalf("got %d accounts, want exactly 1 CLI override account: %+v", len(gotAccounts), gotAccounts)
 	}
-	got := sftpAccounts[0]
+	got := gotAccounts[0]
 	if got.Host != "override.example.com" || got.Port != 2222 || got.User != "override" || got.KeyFile != "/root/.ssh/override" || got.KnownHosts != "/root/.ssh/known_hosts" || got.Root != "/override-root" {
 		t.Fatalf("unexpected override account: %+v", got)
+	}
+}
+
+func TestWritableSFTPRootCandidatesAuto(t *testing.T) {
+	got := writableSFTPRootCandidates(sftpAccount{Root: "auto", User: "backup08"})
+	want := []string{".", "/data", "/backup", "/backups", "/upload", "/uploads", "/home/backup08"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("candidates = %#v, want %#v", got, want)
+	}
+}
+
+func TestWritableSFTPRootCandidatesExplicit(t *testing.T) {
+	got := writableSFTPRootCandidates(sftpAccount{Root: "/data"})
+	want := []string{"/data"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("candidates = %#v, want %#v", got, want)
 	}
 }
 
@@ -110,12 +123,33 @@ func TestRemoteSFTPPath(t *testing.T) {
 	}
 }
 
-func TestMkdirBatch(t *testing.T) {
+func TestRemoteSFTPPathChrootCurrentDirectory(t *testing.T) {
+	acc := sftpAccount{Root: "."}
+	got := remoteSFTPPath(acc, "server-a/redis-backup/redis_6379/daily/a.tar.gz")
+	want := "server-a/redis-backup/redis_6379/daily/a.tar.gz"
+	if got != want {
+		t.Fatalf("remoteSFTPPath = %q, want %q", got, want)
+	}
+}
+
+func TestMkdirBatchAbsolute(t *testing.T) {
 	got := strings.Split(strings.TrimSpace(mkdirBatch("/a/b/c")), "\n")
 	want := []string{
 		`-mkdir "/a"`,
 		`-mkdir "/a/b"`,
 		`-mkdir "/a/b/c"`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mkdirBatch = %#v, want %#v", got, want)
+	}
+}
+
+func TestMkdirBatchRelative(t *testing.T) {
+	got := strings.Split(strings.TrimSpace(mkdirBatch("a/b/c")), "\n")
+	want := []string{
+		`-mkdir "a"`,
+		`-mkdir "a/b"`,
+		`-mkdir "a/b/c"`,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("mkdirBatch = %#v, want %#v", got, want)
@@ -140,7 +174,10 @@ func TestNormalizedSFTPDefaults(t *testing.T) {
 	if got := normalizedSFTPPort(0); got != 22 {
 		t.Fatalf("port = %d, want 22", got)
 	}
-	if got := normalizedSFTPRoot("backup"); got != "/backup" {
-		t.Fatalf("root = %q, want /backup", got)
+	if got := normalizedSFTPRoot(""); got != "auto" {
+		t.Fatalf("root = %q, want auto", got)
+	}
+	if got := normalizedSFTPRoot("data"); got != "/data" {
+		t.Fatalf("root = %q, want /data", got)
 	}
 }
