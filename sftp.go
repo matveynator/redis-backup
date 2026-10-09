@@ -5,7 +5,6 @@ package main
 
 import (
 	"bufio"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -54,6 +53,13 @@ func (s *nativeSFTPSession) Close() {
 	if s.ssh != nil {
 		_ = s.ssh.Close()
 	}
+}
+
+type sftpDiscoveryFS interface {
+	Mkdir(string) error
+	RemoveDirectory(string) error
+	ReadDir(string) ([]os.FileInfo, error)
+	MkdirAll(string) error
 }
 
 var (
@@ -288,7 +294,7 @@ func remoteJoin(root, rel string) string {
 	return path.Join(root, rel)
 }
 
-func ensureRemoteDir(client *sftp.Client, dir string) error {
+func ensureRemoteDir(client sftpDiscoveryFS, dir string) error {
 	dir = path.Clean(dir)
 	if dir == "." || dir == "/" {
 		return nil
@@ -296,7 +302,7 @@ func ensureRemoteDir(client *sftp.Client, dir string) error {
 	return client.MkdirAll(dir)
 }
 
-func probeWritableDir(client *sftp.Client, dir string) error {
+func probeWritableDir(client sftpDiscoveryFS, dir string) error {
 	probe := fmt.Sprintf(".redis-backup-write-test-%d-%d", os.Getpid(), time.Now().UnixNano())
 	probePath := probe
 	if dir != "." {
@@ -308,7 +314,7 @@ func probeWritableDir(client *sftp.Client, dir string) error {
 	return client.RemoveDirectory(probePath)
 }
 
-func discoverSFTPRootCandidates(client *sftp.Client) ([]string, error) {
+func discoverSFTPRootCandidates(client sftpDiscoveryFS) ([]string, error) {
 	entries, err := client.ReadDir(".")
 	if err != nil {
 		return nil, err
@@ -328,35 +334,29 @@ func discoverSFTPRootCandidates(client *sftp.Client) ([]string, error) {
 	return dirs, nil
 }
 
-func resolveWritableSFTPRoot(acc sftpAccount) (string, error) {
-	session, err := openNativeSFTP(acc)
-	if err != nil {
-		return "", err
-	}
-	defer session.Close()
-
+func resolveWritableSFTPRootWithFS(acc sftpAccount, client sftpDiscoveryFS) (string, error) {
 	root := normalizedSFTPRoot(acc.Root)
 	if root != "auto" {
-		if err := ensureRemoteDir(session.sftp, root); err != nil {
+		if err := ensureRemoteDir(client, root); err != nil {
 			return "", fmt.Errorf("create SFTP root %s: %w", root, err)
 		}
-		if err := probeWritableDir(session.sftp, root); err != nil {
+		if err := probeWritableDir(client, root); err != nil {
 			return "", fmt.Errorf("SFTP root %s is not writable: %w", root, err)
 		}
 		return root, nil
 	}
 
-	if err := probeWritableDir(session.sftp, "."); err == nil {
+	if err := probeWritableDir(client, "."); err == nil {
 		return ".", nil
 	}
 
-	candidates, err := discoverSFTPRootCandidates(session.sftp)
+	candidates, err := discoverSFTPRootCandidates(client)
 	if err != nil {
 		return "", fmt.Errorf("list SFTP directories: %w", err)
 	}
 	var failures []string
 	for _, candidate := range candidates {
-		if err := probeWritableDir(session.sftp, candidate); err == nil {
+		if err := probeWritableDir(client, candidate); err == nil {
 			return candidate, nil
 		} else {
 			failures = append(failures, fmt.Sprintf("%s: %v", candidate, err))
@@ -366,6 +366,15 @@ func resolveWritableSFTPRoot(acc sftpAccount) (string, error) {
 		return "", fmt.Errorf("current SFTP directory is not writable and contains no subdirectories")
 	}
 	return "", fmt.Errorf("no writable SFTP root among visible directories (%s)", strings.Join(failures, "; "))
+}
+
+func resolveWritableSFTPRoot(acc sftpAccount) (string, error) {
+	session, err := openNativeSFTP(acc)
+	if err != nil {
+		return "", err
+	}
+	defer session.Close()
+	return resolveWritableSFTPRootWithFS(acc, session.sftp)
 }
 
 func remoteSFTPPath(acc sftpAccount, remoteRel string) string {
@@ -556,5 +565,3 @@ func checkSFTPBackups(host string, ports []string, threshold time.Time) sftpChec
 	}
 	return result
 }
-
-var _ = errors.New
